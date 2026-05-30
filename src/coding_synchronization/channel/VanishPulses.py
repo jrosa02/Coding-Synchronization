@@ -1,10 +1,16 @@
 import numpy as np
 
+from coding_synchronization.StageABC import StageABC
 
-class VanishPulses:
-    def __init__(self, rate: float) -> None:
+
+class VanishPulses(StageABC):
+    def __init__(self, rate: float, seed: int = 42) -> None:
+        super().__init__(seed=seed)
         self.rate = rate
 
-    def vanish(self, frames: np.ndarray) -> np.ndarray:
-        mask = np.random.random(len(frames)) >= self.rate
-        return frames[mask]
+    def process(self, signal: np.ndarray) -> np.ndarray:
+        mask = self.rng.random(len(signal)) >= self.rate
+        return signal[mask]
+
+    def reset(self) -> None:
+        pass

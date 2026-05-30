@@ -1,12 +1,18 @@
 import numpy as np
 
+from coding_synchronization.StageABC import StageABC
 
-class AddedPulses:
-    def __init__(self, rate: float) -> None:
+
+class AddedPulses(StageABC):
+    def __init__(self, rate: float, seed: int = 42) -> None:
+        super().__init__(seed=seed)
         self.rate = rate
 
-    def add(self, offsets: np.ndarray) -> np.ndarray:
-        assert offsets.dtype == np.float64
-        n_added = np.random.poisson(self.rate * len(offsets))
-        spurious = np.random.uniform(offsets[0], offsets[-1], n_added)
-        return np.sort(np.concatenate([offsets, spurious]))
+    def process(self, signal: np.ndarray) -> np.ndarray:
+        signal = signal.astype(np.float64)
+        n_added = self.rng.poisson(self.rate * len(signal))
+        spurious = self.rng.uniform(signal[0], signal[-1], n_added)
+        return np.sort(np.concatenate([signal, spurious]))
+
+    def reset(self) -> None:
+        pass

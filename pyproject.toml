@@ -14,7 +14,27 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "UP",   # pyupgrade — modernise syntax
+    "B",    # flake8-bugbear — common bugs and design issues
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific rules
+    "N",    # pep8 naming conventions
+    "PIE",  # misc improvements
+]
+ignore = [
+    "B008",   # function calls in default args — intentional in StageABC queue defaults
+    "SIM108", # ternary operator — prefer explicit if/else in pipeline code
+    "N999",   # PascalCase module names — established convention in this project
+]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.pyright]
+reportArgumentType = "none"

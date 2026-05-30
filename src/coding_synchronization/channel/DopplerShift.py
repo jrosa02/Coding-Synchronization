@@ -1,14 +1,21 @@
 import numpy as np
 
+from coding_synchronization.StageABC import StageABC
+
 C = 2.998e8  # m/s
 GM = 3.986e14  # m³/s²
 R_EARTH = 6.371e6  # m
 
 
-class DopplerShift:
+class DopplerShift(StageABC):
     def __init__(
-        self, altitude_km: float, chip_duration_s: float = 20e-9, tca_chip: float | None = None
+        self,
+        altitude_km: float,
+        chip_duration_s: float = 20e-9,
+        tca_chip: float | None = None,
+        seed: int = 42,
     ) -> None:
+        super().__init__(seed=seed)
         self.altitude_m = altitude_km * 1e3
         self.chip_duration_s = chip_duration_s
         self.tca_chip = tca_chip
@@ -28,12 +35,15 @@ class DopplerShift:
     def _range_delay_chips(self, slant_range: np.ndarray) -> np.ndarray:
         return (slant_range - self.altitude_m) / (C * self.chip_duration_s)
 
-    def shift(self, offsets: np.ndarray) -> np.ndarray:
-        assert offsets.dtype == np.float64
-        tca = self._resolve_tca(offsets)
-        t = self._chips_to_time(offsets, tca)
+    def process(self, signal: np.ndarray) -> np.ndarray:
+        signal = signal.astype(np.float64)
+        tca = self._resolve_tca(signal)
+        t = self._chips_to_time(signal, tca)
         slant_range = self._slant_range(t)
-        return offsets + self._range_delay_chips(slant_range)
+        return signal + self._range_delay_chips(slant_range)
+
+    def reset(self) -> None:
+        pass
 
 
 if __name__ == "__main__":

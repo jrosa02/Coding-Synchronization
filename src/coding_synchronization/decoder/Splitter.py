@@ -1,14 +1,27 @@
+from typing import Any
+
 import numpy as np
 
+from coding_synchronization.StageABC import StageABC
 
-class Splitter:
-    def __init__(self, threshold: float) -> None:
+
+class Splitter(StageABC):
+    def __init__(self, threshold: float, seed: int = 42) -> None:
+        super().__init__(seed=seed)
         self.threshold = threshold
 
     def split(self, offsets: np.ndarray) -> list[np.ndarray]:
         gaps = np.diff(offsets)
         boundaries = np.where(gaps > self.threshold)[0] + 1
         return [chunk for chunk in np.split(offsets, boundaries) if len(chunk) > 0]
+
+    def process(
+        self, signal: np.ndarray[tuple[Any, ...], np.dtype[Any]]
+    ) -> np.ndarray[tuple[Any, ...], np.dtype[Any]]:
+        return np.array(self.split(signal), dtype=object)
+
+    def reset(self) -> None:
+        pass
 
 
 if __name__ == "__main__":
@@ -47,7 +60,7 @@ if __name__ == "__main__":
     ax1.grid(True)
 
     colors = plt.colormaps["tab10"](np.linspace(0, 1, len(frames_out)))
-    for i, (frame, color) in enumerate(zip(frames_out, colors)):
+    for i, (frame, color) in enumerate(zip(frames_out, colors, strict=False)):
         ax2.vlines(frame, i, i + 0.8, linewidth=1.0, color=color)
     ax2.set_title(f"Split result: {len(frames_out)} frames")
     ax2.set_xlabel("Position")
