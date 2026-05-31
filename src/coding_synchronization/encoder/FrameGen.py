@@ -2,6 +2,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from coding_synchronization.encoder.Modulation import ModulationParams
+
 
 @dataclass
 class FrameParams:
@@ -13,19 +15,24 @@ class FrameParams:
 
 
 class FrameGen:
-    def __init__(self, params: FrameParams, ppm_rank: int, seed: int = 42) -> None:
+    def __init__(self, params: FrameParams, modulparams: ModulationParams, seed: int = 42) -> None:
         self.rng = np.random.default_rng(seed)
         self.sync_num = params.sync_num
         self.metadata_num = params.metadata_num
         self.data_num = params.data_num
         self.ecc_num = params.ecc_num
         self.eof_num = params.eof_num
-        self.word_size = ppm_rank
-        self.max_value = (2**ppm_rank) - 1
+        self.ppm_rank = modulparams.ppm_rank
+        self.max_value = (2**self.ppm_rank) - 1
+        self.dead_slots = modulparams.dead_slots
         self.frame_len = sum(
             (params.sync_num, params.metadata_num, params.data_num, params.ecc_num)
         )
         self._meta_counter = 0
+
+    @property
+    def word_period(self) -> int:
+        return self.max_value + 1 + self.dead_slots
 
     def reset(self) -> None:
         self._meta_counter = 0
@@ -57,7 +64,7 @@ class FrameGen:
         all_words = np.concatenate([frames, eof_slots], axis=1).flatten()
 
         slot_indices = np.arange(len(all_words), dtype=np.uint64)
-        positions = slot_indices * (self.max_value + 1) + all_words.astype(np.uint64)
+        positions = slot_indices * np.uint64(self.word_period) + all_words.astype(np.uint64)
 
         frame_indices = np.arange(n_frames, dtype=np.uint64)
         eof_starts = frame_indices * total_words + self.frame_len
@@ -87,11 +94,11 @@ class FrameGen:
         return self._to_positions(frames, n_frames)
 
     def decode(self, positions: np.ndarray) -> np.ndarray:
-        slot_size = np.uint64(self.max_value + 1)
+        word_period = np.uint64(self.word_period)
         total_words_per_frame = np.uint64(self.frame_len + self.eof_num)
 
-        slot_indices = positions // slot_size
-        values = (positions % slot_size).astype(np.uint16)
+        slot_indices = positions // word_period
+        values = (positions % word_period).astype(np.uint16)
 
         frame_nums = slot_indices // total_words_per_frame
         word_in_frame = slot_indices % total_words_per_frame

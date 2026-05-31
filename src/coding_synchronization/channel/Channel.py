@@ -30,8 +30,8 @@ class Channel(CompoundStage):
             stages.append(
                 DopplerShift(
                     altitude_km=params.altitude_km,
-                    chip_duration_s=params.chip_duration_s,
-                    tca_chip=params.tca_chip,
+                    slot_time_s=params.chip_duration_s,
+                    tca_slot=params.tca_chip,
                 )
             )
         if params.max_const_offset is not None:

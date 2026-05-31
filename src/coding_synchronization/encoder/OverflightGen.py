@@ -22,12 +22,12 @@ class OverflightGen(StageABC):
         seed: int = 42,
     ) -> None:
         super().__init__(seed=seed)
-        self._frame_gen = FrameGen(frame_params, ppm_rank=mod_params.ppm_rank, seed=seed)
+        self._frame_gen = FrameGen(frame_params, modulparams=mod_params, seed=seed)
         self._data_num = frame_params.data_num
 
         frame_duration_s = (
             (self._frame_gen.frame_len + frame_params.eof_num)
-            * (2**mod_params.ppm_rank)
+            * self._frame_gen.word_period
             * float(mod_params.slot_time)
         )
         self.n_frames = max(1, math.floor(overflight_params.time_s / frame_duration_s))

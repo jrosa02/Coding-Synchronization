@@ -7,3 +7,4 @@ import numpy as np
 class ModulationParams:
     ppm_rank: int
     slot_time: np.float64
+    dead_slots: int

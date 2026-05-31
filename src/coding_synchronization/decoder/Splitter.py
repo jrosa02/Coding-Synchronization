@@ -13,7 +13,7 @@ class Splitter(StageABC):
     def split(self, offsets: np.ndarray) -> list[np.ndarray]:
         gaps = np.diff(offsets)
         boundaries = np.where(gaps > self.threshold)[0] + 1
-        return [chunk for chunk in np.split(offsets, boundaries) if len(chunk) > 0]
+        return [chunk - chunk[0] for chunk in np.split(offsets, boundaries) if len(chunk) > 0]
 
     def process(
         self, signal: np.ndarray[tuple[Any, ...], np.dtype[Any]]
