@@ -92,21 +92,3 @@ class FrameGen:
         self._fill_ecc(frames, s2, s3, n_frames)
 
         return self._to_positions(frames, n_frames)
-
-    def decode(self, positions: np.ndarray) -> np.ndarray:
-        word_period = np.uint64(self.word_period)
-        total_words_per_frame = np.uint64(self.frame_len + self.eof_num)
-
-        slot_indices = positions // word_period
-        values = (positions % word_period).astype(np.uint16)
-
-        frame_nums = slot_indices // total_words_per_frame
-        word_in_frame = slot_indices % total_words_per_frame
-
-        n_frames = int(frame_nums[-1]) + 1
-        frames = np.zeros((n_frames, self.frame_len), dtype=np.uint16)
-        frames[frame_nums, word_in_frame] = values
-
-        _, s1, s2, _ = np.cumsum([self.sync_num, self.metadata_num, self.data_num, self.ecc_num])
-
-        return frames[:, s1:s2].flatten()

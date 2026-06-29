@@ -1,35 +1,25 @@
 import numpy as np
 
-from coding_synchronization.channel.RandomShift import RandomShift
-from coding_synchronization.channel.VanishPulses import VanishPulses
-from coding_synchronization.encoder.FrameGen import FrameGen, FrameParams
+from coding_synchronization.channel import ChannelParams
+from coding_synchronization.encoder import FrameParams, ModulationParams, PassageParams
+from coding_synchronization.Model import Model1
 
-WORD_SIZE = 10
-CONSTANT_OFFSET = 1000
-
-generator = FrameGen(
-    FrameParams(sync_num=4, metadata_num=4, data_num=4, ecc_num=4, eof_num=4, word_size=WORD_SIZE)
+mod_params = ModulationParams(ppm_rank=10, slot_time=np.float64(64e-9), dead_slots=8)
+frame_params = FrameParams(sync_num=8, metadata_num=4, data_num=240, ecc_num=4, eof_num=64)
+overflight_params = PassageParams(altitude_km=1500.0, max_elevation_deg=60.0)
+channel_params = ChannelParams(
+    sigma=0.1, vanish_rate=0.005, max_const_offset=1024,
+    altitude_km=1500.0, added_rate=0.005,
 )
-vanisher = VanishPulses(rate=0.05)
-shifter = RandomShift(sigma=0.5)
+data = np.random.randint(0, 1 << mod_params.ppm_rank, 8, dtype=np.uint16)
 
-data = np.random.randint(0, (1 << WORD_SIZE) - 1, 8, dtype=np.uint16)
-print("original data: ", data)
-
-generator.load(data)
-positions = generator.generate()
-assert positions is not None
-print("ppm positions (first 8):", positions[:8])
-
-positions = vanisher.process(positions)
-print(f"after vanish ({len(positions)} pulses remaining):", positions[:8])
-
-positions = shifter.process(positions.astype(np.float64))
-print("after awgn shift (first 8):", positions[:8])
-
-positions = positions + CONSTANT_OFFSET
-print("after constant offset (first 8):", positions[:8])
-
-positions = np.round(positions).astype(np.uint64)
-decoded = generator.decode(positions)
-print("decoded data:", decoded)
+model = Model1(
+    data=data,
+    frame_params=frame_params,
+    mod_params=mod_params,
+    overflight_params=overflight_params,
+    channel_params=channel_params,
+    plot=True,
+)
+model.construct_pipeline()
+model.run()

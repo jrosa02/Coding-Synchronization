@@ -7,18 +7,39 @@ from coding_synchronization.encoder.FrameGen import FrameGen, FrameParams
 from coding_synchronization.encoder.Modulation import ModulationParams
 from coding_synchronization.StageABC import StageABC
 
+_R_EARTH_KM = 6371.0
+_GM_KM3_S2 = 3.986e5  # km³/s²
+
+
+def _elevation_to_time(altitude_km: float, max_elevation_deg: float) -> float:
+    """Compute satellite pass duration from orbital altitude and peak elevation angle."""
+    h = altitude_km
+    r = _R_EARTH_KM + h
+    theta = math.radians(max_elevation_deg)
+
+    T_orb = 2 * math.pi * math.sqrt(r**3 / _GM_KM3_S2)
+    lambda_0 = math.acos(_R_EARTH_KM / r)
+    nadir = math.asin(_R_EARTH_KM * math.cos(theta) / r)
+    lambda_min = math.pi / 2 - theta - nadir
+
+    lambda_min = max(0.0, min(lambda_min, lambda_0))
+    half_arc = math.sqrt(max(0.0, lambda_0**2 - lambda_min**2))
+    return T_orb * half_arc / math.pi
+
 
 @dataclass
-class OverflightParams:
-    time_s: float
+class PassageParams:
+    altitude_km: float
+    max_elevation_deg: float
+    time_s: float | None = None  # if set, caps the elevation-derived pass time
 
 
-class OverflightGen(StageABC):
+class PassageGen(StageABC):
     def __init__(
         self,
         frame_params: FrameParams,
         mod_params: ModulationParams,
-        overflight_params: OverflightParams,
+        overflight_params: PassageParams,
         seed: int = 42,
     ) -> None:
         super().__init__(seed=seed)
@@ -30,7 +51,16 @@ class OverflightGen(StageABC):
             * self._frame_gen.word_period
             * float(mod_params.slot_time)
         )
-        self.n_frames = max(1, math.floor(overflight_params.time_s / frame_duration_s))
+
+        computed_time_s = _elevation_to_time(
+            overflight_params.altitude_km, overflight_params.max_elevation_deg
+        )
+        if overflight_params.time_s is not None:
+            actual_time_s = min(overflight_params.time_s, computed_time_s)
+        else:
+            actual_time_s = computed_time_s
+
+        self.n_frames = max(1, math.floor(actual_time_s / frame_duration_s))
 
         self._data: np.ndarray | None = None
         self._generated = False
