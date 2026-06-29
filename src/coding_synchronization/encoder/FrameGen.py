@@ -1,8 +1,11 @@
+import logging
 from dataclasses import dataclass
 
 import numpy as np
 
 from coding_synchronization.encoder.Modulation import ModulationParams
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -29,6 +32,10 @@ class FrameGen:
             (params.sync_num, params.metadata_num, params.data_num, params.ecc_num)
         )
         self._meta_counter = 0
+        logger.info(
+            "FrameGen initialized: frame_len=%d, ppm_rank=%d, word_period=%d",
+            self.frame_len, self.ppm_rank, self.word_period,
+        )
 
     @property
     def word_period(self) -> int:
@@ -91,4 +98,6 @@ class FrameGen:
         self._fill_data(frames, s1, s2, split_data)
         self._fill_ecc(frames, s2, s3, n_frames)
 
-        return self._to_positions(frames, n_frames)
+        positions = self._to_positions(frames, n_frames)
+        logger.debug("encode: %d data words → %d frames, %d pulses", len(data), n_frames, len(positions))
+        return positions

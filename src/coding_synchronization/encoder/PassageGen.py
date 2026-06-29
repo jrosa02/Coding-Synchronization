@@ -1,3 +1,4 @@
+import logging
 import math
 from dataclasses import dataclass
 
@@ -6,6 +7,8 @@ import numpy as np
 from coding_synchronization.encoder.FrameGen import FrameGen, FrameParams
 from coding_synchronization.encoder.Modulation import ModulationParams
 from coding_synchronization.StageABC import StageABC
+
+logger = logging.getLogger(__name__)
 
 _R_EARTH_KM = 6371.0
 _GM_KM3_S2 = 3.986e5  # km³/s²
@@ -64,7 +67,10 @@ class PassageGen(StageABC):
 
         self._data: np.ndarray | None = None
         self._generated = False
-        print(f"Frames2send: {self.n_frames}")
+        logger.info(
+            "Frames2send: %d  (pass_time_s=%.3f, frame_duration_s=%.6f)",
+            self.n_frames, actual_time_s, frame_duration_s,
+        )
 
     def load(self, data: np.ndarray) -> None:
         self._data = data
@@ -85,7 +91,9 @@ class PassageGen(StageABC):
         else:
             data = self.rng.integers(0, self._frame_gen.max_value + 1, total_words, dtype=np.uint16)
 
-        return self._frame_gen.encode(data)
+        result = self._frame_gen.encode(data)
+        logger.debug("generate: emitting %d pulses across %d frames", len(result), self.n_frames)
+        return result
 
     def reset(self) -> None:
         self._generated = False

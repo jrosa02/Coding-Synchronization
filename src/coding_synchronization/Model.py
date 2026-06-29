@@ -1,6 +1,7 @@
 import abc
 import dataclasses
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -25,8 +26,11 @@ from coding_synchronization.encoder import (
     PassageGen,
     PassageParams,
 )
+from coding_synchronization._logging import add_file_handler
 from coding_synchronization.PlotStage import PlotInput, PlotStage
 from coding_synchronization.StageABC import StageRunner, Terminator
+
+logger = logging.getLogger(__name__)
 
 
 class ModelResult:  # TODO: define result fields
@@ -125,16 +129,18 @@ class Model1(ModelABC):
         self.runner.append(
             DopplerShift(
                 altitude_km=self.overflight_params.altitude_km,
-                slot_time_s=cp.chip_duration_s,
-                tca_slot=cp.tca_chip,
+                slot_time_s=cp.chirp_duration_s,
+                tca_slot=cp.tca_chirp,
             )
         )
         maybe_plot(3)
-        self.runner.append(ConstantOffset())
+        self.runner.append(ConstantOffset(self.channel_params.max_const_offset))
         maybe_plot(4)
         # self.runner.append(AddedPulses(rate=cp.added_rate))
         # maybe_plot(5)
-        self.runner.append(Splitter(threshold=3072))
+        word_period = (1 << self.mod_params.ppm_rank) + self.mod_params.dead_slots
+        threshold = self.frame_params.eof_num * word_period
+        self.runner.append(Splitter(threshold))
         maybe_plot(6)
         self.runner.append(Syncer(self.mod_params, self.frame_params.sync_num))
         maybe_plot(7)
@@ -144,15 +150,19 @@ class Model1(ModelABC):
 
     def run(self) -> None:
         assert self._gen is not None, "call construct_pipeline() before run()"
-        self._gen.load(self.data)
-        self.runner.run()
 
         output_dir = Path("output") / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         output_dir.mkdir(parents=True, exist_ok=True)
+        add_file_handler(output_dir / "run.log")
+        logger.info("Run started, output directory: %s", output_dir)
+
+        self._gen.load(self.data)
+        self.runner.run()
 
         for i, fig in enumerate(self._figures):
             fig.tight_layout()
             fig.savefig(output_dir / f"figure_{i}.png", dpi=150)
+            logger.debug("Saved figure_%d.png", i)
 
         params = {
             "frame_params": dataclasses.asdict(self.frame_params),
@@ -162,7 +172,7 @@ class Model1(ModelABC):
             "seed": self.seed,
         }
         (output_dir / "params.json").write_text(json.dumps(params, indent=2, default=str))
-        print(f"Results saved → {output_dir}")
+        logger.info("Results saved to %s", output_dir)
 
         if self.plot:
             plt.show()
@@ -186,5 +196,5 @@ if __name__ == "__main__":
         plot=True,
     )
     model.construct_pipeline()
-    print("pipeline:", model.runner)
+    logger.debug("Pipeline: %s", model.runner)
     model.run()

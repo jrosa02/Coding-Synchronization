@@ -14,8 +14,8 @@ class ChannelParams:
     vanish_rate: float | None
     max_const_offset: int | None
     added_rate: float | None
-    chip_duration_s: float = field(default=20e-9)
-    tca_chip: float | None = None
+    chirp_duration_s: float = field(default=20e-9)
+    tca_chirp: float | None = None
 
 
 class Channel(CompoundStage):
@@ -28,8 +28,8 @@ class Channel(CompoundStage):
         stages.append(
             DopplerShift(
                 altitude_km=altitude_km,
-                slot_time_s=params.chip_duration_s,
-                tca_slot=params.tca_chip,
+                slot_time_s=params.chirp_duration_s,
+                tca_slot=params.tca_chirp,
             )
         )
         if params.max_const_offset is not None:

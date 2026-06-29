@@ -1,8 +1,13 @@
+import logging
+
 import numpy as np
 
+from coding_synchronization._logging import setup_logging
 from coding_synchronization.channel import ChannelParams
 from coding_synchronization.encoder import FrameParams, ModulationParams, PassageParams
 from coding_synchronization.Model import Model1
+
+setup_logging(level=logging.DEBUG)
 
 mod_params = ModulationParams(ppm_rank=10, slot_time=np.float64(64e-9), dead_slots=8)
 frame_params = FrameParams(sync_num=8, metadata_num=4, data_num=240, ecc_num=4, eof_num=64)
@@ -18,7 +23,7 @@ model = Model1(
     mod_params=mod_params,
     overflight_params=overflight_params,
     channel_params=channel_params,
-    plot=True,
+    plot=False,
 )
 model.construct_pipeline()
 model.run()

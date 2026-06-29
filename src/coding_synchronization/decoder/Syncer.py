@@ -1,7 +1,11 @@
+import logging
+
 import numpy as np
 
 from coding_synchronization.encoder.Modulation import ModulationParams
 from coding_synchronization.StageABC import StageABC
+
+logger = logging.getLogger(__name__)
 
 
 class Syncer(StageABC):
@@ -11,6 +15,10 @@ class Syncer(StageABC):
         self.max_value = (2**modparam.ppm_rank) - 1
         self.word_period = self.max_value + 1 + modparam.dead_slots
         self.margin = self.word_period // 8
+        logger.info(
+            "Syncer initialized: sync_num=%d, word_period=%d, margin=%d",
+            sync_num, self.word_period, self.margin,
+        )
 
     def _sync_frame(self, positions: np.ndarray) -> np.ndarray | None:
         pos = np.sort(positions.astype(np.float64))
@@ -58,10 +66,16 @@ class Syncer(StageABC):
 
     def process(self, signal: np.ndarray) -> np.ndarray:
         results = []
+        failed = 0
         for frame in signal:
             decoded = self._sync_frame(np.asarray(frame))
             if decoded is not None:
                 results.append(decoded)
+            else:
+                failed += 1
+        logger.debug("Syncer: %d frames in, %d decoded, %d failed sync", len(signal), len(results), failed)
+        if failed > 0:
+            logger.warning("Syncer: %d/%d frames failed synchronization", failed, len(signal))
         return np.array(results, dtype=object)
 
     def reset(self) -> None:

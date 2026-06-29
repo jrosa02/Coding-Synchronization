@@ -1,14 +1,18 @@
+import logging
 from typing import Any
 
 import numpy as np
 
 from coding_synchronization.StageABC import StageABC
 
+logger = logging.getLogger(__name__)
+
 
 class Splitter(StageABC):
     def __init__(self, threshold: float, seed: int = 42) -> None:
         super().__init__(seed=seed)
         self.threshold = threshold
+        logger.info("Splitter initialized: threshold=%.1f", threshold)
 
     def split(self, offsets: np.ndarray) -> list[np.ndarray]:
         gaps = np.diff(offsets)
@@ -18,7 +22,9 @@ class Splitter(StageABC):
     def process(
         self, signal: np.ndarray[tuple[Any, ...], np.dtype[Any]]
     ) -> np.ndarray[tuple[Any, ...], np.dtype[Any]]:
-        return np.array(self.split(signal), dtype=object)
+        result = np.array(self.split(signal), dtype=object)
+        logger.debug("Splitter: %d pulses → %d frames (threshold=%.1f)", len(signal), len(result), self.threshold)
+        return result
 
     def reset(self) -> None:
         pass
@@ -55,7 +61,7 @@ if __name__ == "__main__":
     )
     ax1.set_title("Inter-pulse gaps")
     ax1.set_xlabel("Pulse index")
-    ax1.set_ylabel("Gap (chips)")
+    ax1.set_ylabel("Gap (chirps)")
     ax1.legend()
     ax1.grid(True)
 
@@ -70,5 +76,5 @@ if __name__ == "__main__":
     os.makedirs("output", exist_ok=True)
     plt.tight_layout()
     plt.savefig("output/splitter.png", dpi=150)
-    print(f"saved splitter.png — {len(frames_out)} frames")
+    logger.debug("saved splitter.png — %d frames", len(frames_out))
     plt.show()
