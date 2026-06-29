@@ -124,7 +124,9 @@ class Model1(ModelABC):
         maybe_plot(2)
         self.runner.append(
             DopplerShift(
-                altitude_km=cp.altitude_km, slot_time_s=cp.chip_duration_s, tca_slot=cp.tca_chip
+                altitude_km=self.overflight_params.altitude_km,
+                slot_time_s=cp.chip_duration_s,
+                tca_slot=cp.tca_chip,
             )
         )
         maybe_plot(3)
@@ -171,7 +173,7 @@ if __name__ == "__main__":
     frame_params = FrameParams(sync_num=4, metadata_num=4, data_num=4, ecc_num=4, eof_num=4)
     overflight_params = PassageParams(altitude_km=1500.0, max_elevation_deg=60.0)
     channel_params = ChannelParams(
-        sigma=0.1, vanish_rate=0.005, max_const_offset=1024, altitude_km=1500.0, added_rate=0.005
+        sigma=0.1, vanish_rate=0.005, max_const_offset=1024, added_rate=0.005
     )
     data = np.random.randint(0, 1 << mod_params.ppm_rank, 8, dtype=np.uint16)
 
