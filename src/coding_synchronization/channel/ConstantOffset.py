@@ -20,3 +20,6 @@ class ConstantOffset(StageABC):
 
     def reset(self) -> None:
         pass
+
+    def __repr__(self) -> str:
+        return f"ConstantOffset(max_offset={self.max_offset})"

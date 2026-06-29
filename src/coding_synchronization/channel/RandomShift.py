@@ -21,3 +21,6 @@ class RandomShift(StageABC):
 
     def reset(self) -> None:
         pass
+
+    def __repr__(self) -> str:
+        return f"RandomShift(sigma={self.sigma})"

@@ -21,3 +21,6 @@ class VanishPulses(StageABC):
 
     def reset(self) -> None:
         pass
+
+    def __repr__(self) -> str:
+        return f"VanishPulses(rate={self.rate})"

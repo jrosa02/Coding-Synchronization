@@ -98,3 +98,6 @@ class PassageGen(StageABC):
     def reset(self) -> None:
         self._generated = False
         self._frame_gen.reset()
+
+    def __repr__(self) -> str:
+        return f"PassageGen(n_frames={self.n_frames})"

@@ -80,3 +80,6 @@ class Syncer(StageABC):
 
     def reset(self) -> None:
         pass
+
+    def __repr__(self) -> str:
+        return f"Syncer(sync_num={self.sync_num}, word_period={self.word_period})"

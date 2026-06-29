@@ -156,6 +156,9 @@ class Model1(ModelABC):
         add_file_handler(output_dir / "run.log")
         logger.info("Run started, output directory: %s", output_dir)
 
+        (output_dir / "pipeline.txt").write_text(repr(self.runner))
+        logger.info("Pipeline: %s", repr(self.runner))
+
         self._gen.load(self.data)
         self.runner.run()
 
@@ -196,5 +199,4 @@ if __name__ == "__main__":
         plot=True,
     )
     model.construct_pipeline()
-    logger.debug("Pipeline: %s", model.runner)
     model.run()

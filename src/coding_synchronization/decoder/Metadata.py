@@ -35,3 +35,6 @@ class MetadataCheck(StageABC):
 
     def reset(self) -> None:
         super().reset()
+
+    def __repr__(self) -> str:
+        return "MetadataCheck()"

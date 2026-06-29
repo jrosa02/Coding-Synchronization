@@ -54,6 +54,9 @@ class DopplerShift(StageABC):
     def reset(self) -> None:
         pass
 
+    def __repr__(self) -> str:
+        return f"DopplerShift(altitude_km={self.altitude_m / 1e3:.1f}, slot_time_s={self.chirp_duration_s:.2e})"
+
 
 if __name__ == "__main__":
     import os

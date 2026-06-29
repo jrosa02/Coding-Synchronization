@@ -29,6 +29,9 @@ class Splitter(StageABC):
     def reset(self) -> None:
         pass
 
+    def __repr__(self) -> str:
+        return f"Splitter(threshold={self.threshold})"
+
 
 if __name__ == "__main__":
     import os

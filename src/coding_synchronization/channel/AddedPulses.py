@@ -23,3 +23,6 @@ class AddedPulses(StageABC):
 
     def reset(self) -> None:
         pass
+
+    def __repr__(self) -> str:
+        return f"AddedPulses(rate={self.rate})"
