@@ -19,8 +19,10 @@ from coding_synchronization._logging import setup_logging
 from coding_synchronization.measurement.Cli import (
     add_extraction_args,
     add_modulation_args,
+    add_title_arg,
     add_verbose_arg,
     add_waveform_args,
+    apply_suptitle,
     extraction_params,
     log_level,
     output_dir,
@@ -46,6 +48,7 @@ def _parse_args() -> argparse.Namespace:
     add_waveform_args(parser)
     add_extraction_args(parser)
     add_modulation_args(parser)
+    add_title_arg(parser)
     add_verbose_arg(parser)
     parser.add_argument("--zoom-start", type=float, default=0.0, help="zoom window start, seconds")
     parser.add_argument(
@@ -132,6 +135,7 @@ def main() -> None:
     ax4.legend()
 
     out = output_dir()
+    apply_suptitle(fig, args)
     fig.tight_layout()
     fig.savefig(out / "measurement_overview.png", dpi=150)
     logger.info("Saved %s", out / "measurement_overview.png")

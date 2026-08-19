@@ -20,8 +20,10 @@ from coding_synchronization.encoder import FrameParams, ModulationParams
 from coding_synchronization.measurement.Cli import (
     add_extraction_args,
     add_modulation_args,
+    add_title_arg,
     add_verbose_arg,
     add_waveform_args,
+    apply_suptitle,
     extraction_params,
     log_level,
     min_separation_samples,
@@ -47,6 +49,7 @@ def _parse_args() -> argparse.Namespace:
     add_waveform_args(parser)
     add_extraction_args(parser)
     add_modulation_args(parser)
+    add_title_arg(parser)
     add_verbose_arg(parser)
     parser.add_argument("--plot", action="store_true", help="render per-stage tables")
     parser.add_argument("--seed", type=int, default=42)
@@ -102,7 +105,9 @@ def _frame_sections_xml(model: Model2, frame_params: FrameParams) -> ET.Element:
     return root
 
 
-def _save_frame_sections(model: Model2, frame_params: FrameParams) -> None:
+def _save_frame_sections(
+    model: Model2, frame_params: FrameParams, args: argparse.Namespace
+) -> None:
     """One row per synced frame: raw pulses over semi-transparent sync/metadata/data/ecc/eof bands.
 
     Saves both frame_sections.png (for a quick look) and frame_sections.xml (the same section
@@ -121,6 +126,7 @@ def _save_frame_sections(model: Model2, frame_params: FrameParams) -> None:
             axes[i, 0], positions, frame_start, model.word_period, frame_params,
             title=f"Frame {i}",
         )
+    apply_suptitle(fig, args)
     fig.tight_layout()
     fig.savefig(out_dir / "frame_sections.png", dpi=150)
     plt.close(fig)
@@ -170,7 +176,7 @@ def main() -> None:
     model.run()
 
     if args.plot:
-        _save_frame_sections(model, frame_params)
+        _save_frame_sections(model, frame_params, args)
 
     frames = model.decoded_frames_with_metadata
     meta_num = args.metadata_num

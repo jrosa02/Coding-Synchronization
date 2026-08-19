@@ -134,14 +134,25 @@ def ideal_pulse_train(
 ) -> np.ndarray:
     """Sum of triangular kernels at `centers`, evaluated at `t` — a synthetic "ideal PPM" trace
     directly comparable (same time/amplitude units) to a real detected pulse train.
+
+    `t` must be sorted ascending. Each kernel is only evaluated over the samples it actually
+    touches (a pulse is a few samples wide, a whole-frame window is millions), so this stays
+    linear in `len(t)` instead of building the full len(t) x len(centers) outer product.
     """
+    t = np.asarray(t, dtype=np.float64)
     centers = np.asarray(centers, dtype=np.float64)
+    out = np.zeros_like(t, dtype=np.float64)
     if len(centers) == 0:
-        return np.zeros_like(t, dtype=np.float64)
+        return out
     half_width = max(width, 1e-12) / 2.0
-    dist = np.abs(t[:, None] - centers[None, :])
-    kernels = amplitude * np.clip(1.0 - dist / half_width, 0.0, None)
-    return kernels.sum(axis=1)
+    lo = np.searchsorted(t, centers - half_width, side="left")
+    hi = np.searchsorted(t, centers + half_width, side="right")
+    for center, a, b in zip(centers, lo, hi, strict=True):
+        if b > a:
+            out[a:b] += amplitude * np.clip(
+                1.0 - np.abs(t[a:b] - center) / half_width, 0.0, None
+            )
+    return out
 
 
 def plot_frame_detail(
@@ -157,10 +168,10 @@ def plot_frame_detail(
     slot_positions: np.ndarray | None = None,
     title: str | None = None,
 ) -> None:
-    """Raw trace + detected-pulse ticks + a synthetic ideal-PPM overlay, over one frame's
-    sync/metadata window — so a real bump with no ideal marker (or vice versa) is obvious.
+    """Raw trace + detected-pulse ticks + a synthetic ideal-PPM overlay, over one frame (or a
+    chosen span of its sections) — so a real bump with no ideal marker (or vice versa) is obvious.
 
-    `section_bounds` is `[(name, start_s, end_s), ...]` (only sync/metadata expected here),
+    `section_bounds` is `[(name, start_s, end_s), ...]`, any of sync/metadata/data/ecc/eof,
     reusing `_SECTION_COLORS` for shading. `slot_positions`, if given, draws a very faint
     full-height line at every individual PPM slot boundary — a fine ruler to count slots against
     once zoomed in, well below the section/pulse/ideal layers. `t`/`detected_t`/`ideal_t` are all
@@ -179,19 +190,20 @@ def plot_frame_detail(
         if end > start:
             ax.axvspan(start, end, color=_SECTION_COLORS[name], alpha=0.3, label=name)
 
-    ax.plot(t, trace, linewidth=0.6, color="tab:green", label="raw signal", zorder=2)
+    ax.plot(t, trace, linewidth=0.12, color="tab:green", label="raw signal", zorder=2)
 
     if len(detected_t):
         ax.vlines(
-            detected_t, 0, detected_amp, color="black", linewidth=1.2, alpha=0.8,
-            label="detected pulse", zorder=3,
+            detected_t, 0, detected_amp, color="black", linewidth=0.5, alpha=0.8,
+            linestyle=":", label="detected pulse", zorder=3,
         )
 
-    ideal_trace = ideal_pulse_train(t, ideal_t, ideal_width, ideal_amp)
-    ax.plot(
-        t, ideal_trace, linewidth=1.0, linestyle="--", color="tab:purple", alpha=0.8,
-        label="ideal PPM", zorder=1,
-    )
+    if len(ideal_t):
+        ideal_trace = ideal_pulse_train(t, ideal_t, ideal_width, ideal_amp)
+        ax.plot(
+            t, ideal_trace, linewidth=1.0, linestyle="--", color="tab:purple", alpha=0.8,
+            label="ideal PPM", zorder=1,
+        )
 
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Amplitude")
@@ -207,36 +219,72 @@ def plot_sync_eye(
     ax: Axes,
     t_rel_list: list[np.ndarray],
     trace_list: list[np.ndarray],
-    decoded_values: np.ndarray,
-    sync_value: int,
     title: str | None = None,
+    xlabel: str = "Time relative to rising-edge crossing (s)",
+    anchor_label: str = "rising edge",
+    bins: tuple[int, int] = (800, 400),
+    cmap: str = "turbo",
 ) -> None:
-    """Eye-diagram overlay: every sync pulse in the capture, each re-anchored on its own
-    rising-edge crossing (t=0), stacked on one axes — pulse-shape/jitter/amplitude consistency
-    is directly visible, and each trace is colored by its decoded PPM value (should all read
-    `sync_value`; any other color is a sync word that decoded wrong).
+    """Persistence eye diagram: every sync pulse in the capture, re-anchored on a common
+    reference (t=0), accumulated into a 2D density map the way a scope's persistence display
+    builds one — color is how many traces pass through that (time, amplitude) bin, so the
+    common path glows and a single stray trace stays dim.
+
+    Traces are resampled onto a shared time grid and each column-to-column segment is rasterized
+    over every amplitude bin it crosses, so a steep edge is a continuous line rather than the
+    dotted trail of hits that point-sampling would leave. Bins no trace touches stay transparent.
     """
-    from matplotlib import colormaps
-    from matplotlib.cm import ScalarMappable
-    from matplotlib.colors import Normalize
+    from matplotlib.colors import LogNorm
 
-    spread = float(np.max(np.abs(decoded_values.astype(np.float64) - sync_value))) if len(decoded_values) else 0.0
-    spread = max(spread, 1.0)
-    norm = Normalize(vmin=sync_value - spread, vmax=sync_value + spread)
-    cmap = colormaps["coolwarm"]
+    n_x, n_y = bins
+    t_min = min(float(t[0]) for t in t_rel_list)
+    t_max = max(float(t[-1]) for t in t_rel_list)
+    t_edges = np.linspace(t_min, t_max, n_x + 1)
+    # Off the ends of a given trace: NaN, so a short trace contributes nothing there rather
+    # than a flat line at its own edge value.
+    resampled = np.vstack([
+        np.interp(t_edges, t_rel, trace, left=np.nan, right=np.nan)
+        for t_rel, trace in zip(t_rel_list, trace_list, strict=True)
+    ])
 
-    for t_rel, trace, value in zip(t_rel_list, trace_list, decoded_values, strict=True):
-        ax.plot(t_rel, trace, linewidth=0.6, alpha=0.25, color=cmap(norm(float(value))))
+    y_min = float(np.nanmin(resampled))
+    y_max = float(np.nanmax(resampled))
+    if y_max <= y_min:
+        y_max = y_min + 1e-12
+    y_edges = np.linspace(y_min, y_max, n_y + 1)
+    scaled = (resampled - y_min) / (y_max - y_min) * n_y
+    # NaN (off the end of a trace) would warn on the int cast; the `valid` mask below drops
+    # those columns anyway, so park them in bin 0.
+    idx = np.clip(np.floor(np.nan_to_num(scaled, nan=0.0)).astype(np.int64), 0, n_y - 1)
 
-    ax.axvline(0.0, color="black", linestyle="--", linewidth=0.8, alpha=0.6, label="rising edge")
-    sm = ScalarMappable(norm=norm, cmap=cmap)
-    sm.set_array([])
-    cbar = ax.figure.colorbar(sm, ax=ax)
-    cbar.set_label(f"decoded PPM value (expected {sync_value})")
+    # One vertical span per (trace, column): mark its first and last amplitude bin, then a
+    # cumulative sum down the amplitude axis fills everything in between — the same trick a
+    # scan-line rasterizer uses, and far cheaper than sampling each segment densely.
+    valid = np.isfinite(resampled[:, :-1]) & np.isfinite(resampled[:, 1:])
+    lo = np.minimum(idx[:, :-1], idx[:, 1:])[valid]
+    hi = np.maximum(idx[:, :-1], idx[:, 1:])[valid]
+    cols = np.broadcast_to(np.arange(n_x), valid.shape)[valid]
+    acc = np.zeros((n_y + 1, n_x), dtype=np.float64)
+    np.add.at(acc, (lo, cols), 1.0)
+    np.add.at(acc, (hi + 1, cols), -1.0)
+    density = np.cumsum(acc, axis=0)[:n_y]
 
-    ax.set_xlabel("Time relative to rising-edge crossing (s)")
+    im = ax.imshow(
+        np.ma.masked_less_equal(density, 0.0), origin="lower", aspect="auto",
+        extent=(t_edges[0], t_edges[-1], y_edges[0], y_edges[-1]), cmap=cmap,
+        norm=LogNorm(vmin=1.0, vmax=max(float(density.max()), 2.0)), zorder=2,
+    )
+    cbar = ax.figure.colorbar(im, ax=ax)
+    cbar.set_label("traces through this bin (log)")
+
+    ax.axvline(
+        0.0, color="black", linestyle="--", linewidth=0.8, alpha=0.6, zorder=3,
+        label=f"{anchor_label} ({len(t_rel_list)} pulses)",
+    )
+
+    ax.set_xlabel(xlabel)
     ax.set_ylabel("Amplitude")
-    ax.grid(True)
+    ax.grid(True, alpha=0.3)
     if title:
         ax.set_title(title)
     ax.legend(loc="upper right", fontsize=8)

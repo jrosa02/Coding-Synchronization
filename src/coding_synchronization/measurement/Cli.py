@@ -23,6 +23,30 @@ def log_level(args: argparse.Namespace) -> int:
     return logging.DEBUG if args.verbose else logging.INFO
 
 
+def add_title_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--title", type=str, default=None,
+        help="custom figure title, replacing the generated one (multi-panel figures get it as a "
+             "suptitle above the per-panel titles)",
+    )
+
+
+def figure_title(args: argparse.Namespace, default: str) -> str:
+    """The single-axes title to use: --title when given, else the generated one."""
+    title = getattr(args, "title", None)
+    return default if title is None else title
+
+
+def apply_suptitle(fig, args: argparse.Namespace) -> None:
+    """Put --title above a multi-panel figure, leaving the per-panel titles alone.
+
+    Call before `fig.tight_layout()` so the suptitle is accounted for in the layout.
+    """
+    title = getattr(args, "title", None)
+    if title:
+        fig.suptitle(title)
+
+
 def add_waveform_args(parser: argparse.ArgumentParser) -> None:
     g = parser.add_argument_group("waveform")
     g.add_argument("path", type=Path, help="two-column differential CSV (R&S RefCurve export)")

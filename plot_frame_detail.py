@@ -1,12 +1,17 @@
-"""Diagnose one frame's sync+metadata detection against the raw waveform.
+"""Diagnose one whole frame's pulse detection against the raw waveform.
 
     python plot_frame_detail.py measurments/RefCurve_....csv --eof-num 2 --threshold 0.3 ...
+    python plot_frame_detail.py ... --sections sync metadata     # just the frame head
 
-Clips the raw combined-differential trace around one frame's sync+metadata section and overlays
-(a) the pulses OffsetExtractor actually detected and (b) a synthetic "ideal PPM" pulse train at
-every word slot's expected position (ground truth for sync words, the value Syncer already
-decoded for metadata words) — a real bump with no ideal marker, or vice versa, means detection
-missed something.
+Clips the raw combined-differential trace around one frame — by default the whole frame,
+sync+metadata+data+ecc — and overlays (a) the pulses OffsetExtractor actually detected and (b) a
+synthetic "ideal PPM" pulse train at every word slot's expected position (ground truth for sync
+words, the value Syncer already decoded for every other word) — a real bump with no ideal marker,
+or vice versa, means detection missed something.
+
+--sections narrows the window to a span of sections (they are contiguous, so a set is shown as
+the range from the earliest to the latest), which is what makes individual pulses resolvable
+again: a full frame is millions of samples wide and a pulse is 1-3 samples.
 """
 
 import argparse
@@ -21,9 +26,11 @@ from coding_synchronization.encoder import FrameParams, ModulationParams
 from coding_synchronization.measurement.Cli import (
     add_extraction_args,
     add_modulation_args,
+    add_title_arg,
     add_verbose_arg,
     add_waveform_args,
     extraction_params,
+    figure_title,
     log_level,
     min_separation_samples,
     slot_time_s,
@@ -35,11 +42,16 @@ from coding_synchronization.measurement.OffsetExtractor import (
     differential,
     extract_offsets,
 )
-from coding_synchronization.measurement.Plotting import plot_frame_detail
+from coding_synchronization.measurement.Plotting import frame_sections, plot_frame_detail
 from coding_synchronization.measurement.WaveformLoader import load_waveform
 from coding_synchronization.Model import Model2
 
 logger = logging.getLogger(f"coding_synchronization.{Path(__file__).stem}")
+
+_SECTIONS = ("sync", "metadata", "data", "ecc")
+# Above this many slots the per-slot ruler is a solid grey wall that costs seconds to draw and
+# tells you nothing — a whole 240-word frame is ~300k slots.
+_MAX_SLOT_RULER = 4000
 
 
 def _parse_args() -> argparse.Namespace:
@@ -47,6 +59,7 @@ def _parse_args() -> argparse.Namespace:
     add_waveform_args(parser)
     add_extraction_args(parser)
     add_modulation_args(parser)
+    add_title_arg(parser)
     add_verbose_arg(parser)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -55,8 +68,18 @@ def _parse_args() -> argparse.Namespace:
              "pulse count, falling back to frame 0 if none match",
     )
     parser.add_argument(
+        "--sections", nargs="+", choices=_SECTIONS, default=None,
+        help="which frame sections to show; default: the whole frame. Sections are contiguous, "
+             "so several are shown as one window spanning the earliest to the latest",
+    )
+    parser.add_argument(
         "--margin-words", type=float, default=1.0,
-        help="extra word_periods of context shown before/after the sync+metadata window",
+        help="extra word_periods of context shown before/after the plotted window",
+    )
+    parser.add_argument(
+        "--trace-only", action="store_true",
+        help="plot only the measured trace — no section bands, detected-pulse ticks, ideal-PPM "
+             "overlay or slot ruler",
     )
     parser.add_argument("--no-show", action="store_true", help="save the figure without plt.show()")
     return parser.parse_args()
@@ -175,26 +198,48 @@ def main() -> None:
     frame_start_abs_sample = frame_start_abs_s / wf.dt_s
 
     sync_value = 0 if args.sync_value is None else int(args.sync_value)
-    metadata_values = np.asarray(
-        model.decoded_frames_with_metadata[idx][: frame_params.metadata_num], dtype=np.float64
+    # Sync words carry a known value; every other word is whatever Syncer decoded for it
+    # (decoded_frames_with_metadata is metadata + data + ecc, in transmission order).
+    decoded = np.asarray(model.decoded_frames_with_metadata[idx], dtype=np.float64)
+    n_nonsync = frame_params.metadata_num + frame_params.data_num + frame_params.ecc_num
+    if len(decoded) < n_nonsync:
+        logger.warning(
+            "Frame %d decoded %d of the expected %d non-sync words — plotting the ideal train "
+            "only as far as the decoded words reach", idx, len(decoded), n_nonsync,
+        )
+    word_values = np.concatenate(
+        [np.full(frame_params.sync_num, float(sync_value)), decoded[:n_nonsync]]
     )
+    metadata_values = decoded[: frame_params.metadata_num]
 
-    sync_ideal = frame_start_abs_sample + (
-        np.arange(frame_params.sync_num) * word_period_samples + sync_value * slot_dur_samples
+    # Word index range of every section except eof (the guard interval carries no words).
+    spans: dict[str, tuple[int, int]] = {}
+    cursor = 0
+    for name, n in frame_sections(frame_params):
+        if name in _SECTIONS:
+            spans[name] = (cursor, cursor + n)
+            cursor += n
+    selected = [name for name in _SECTIONS if args.sections is None or name in args.sections]
+    selected = [name for name in selected if spans[name][1] > spans[name][0]]
+    if not selected:
+        raise SystemExit("No non-empty sections selected — nothing to plot")
+
+    # Sections are contiguous, so a selection is just the range from the earliest to the latest.
+    first_word = min(spans[name][0] for name in selected)
+    last_word = min(max(spans[name][1] for name in selected), len(word_values))
+    if last_word <= first_word:
+        raise SystemExit(
+            f"Frame {idx} has no decoded words in {'+'.join(selected)} — nothing to plot"
+        )
+
+    word_idx = np.arange(first_word, last_word)
+    ideal_samples = frame_start_abs_sample + (
+        word_idx * word_period_samples + word_values[first_word:last_word] * slot_dur_samples
     )
-    metadata_ideal = frame_start_abs_sample + (
-        (frame_params.sync_num + np.arange(frame_params.metadata_num)) * word_period_samples
-        + metadata_values * slot_dur_samples
-    )
-    ideal_samples = np.concatenate([sync_ideal, metadata_ideal])
 
     margin_samples = args.margin_words * word_period_samples
-    window_start = frame_start_abs_sample - margin_samples
-    window_end = (
-        frame_start_abs_sample
-        + (frame_params.sync_num + frame_params.metadata_num) * word_period_samples
-        + margin_samples
-    )
+    window_start = frame_start_abs_sample + first_word * word_period_samples - margin_samples
+    window_end = frame_start_abs_sample + last_word * word_period_samples + margin_samples
     start_sample = max(0, int(np.floor(window_start)))
     end_sample = min(wf.n, int(np.ceil(window_end)))
     if end_sample <= start_sample:
@@ -216,27 +261,51 @@ def main() -> None:
     ideal_width_s = ideal_width_samples * wf.dt_s
 
     word_period_s = word_period_samples * wf.dt_s
-    sync_end_s = frame_start_abs_s + frame_params.sync_num * word_period_s
-    metadata_end_s = sync_end_s + frame_params.metadata_num * word_period_s
     section_bounds = [
-        ("sync", frame_start_abs_s, sync_end_s),
-        ("metadata", sync_end_s, metadata_end_s),
+        (
+            name,
+            frame_start_abs_s + spans[name][0] * word_period_s,
+            frame_start_abs_s + min(spans[name][1], last_word) * word_period_s,
+        )
+        for name in selected
     ]
 
     # Very faint per-slot ruler across the whole visible window, so you can count slots against
-    # a detected/ideal pulse once zoomed in.
+    # a detected/ideal pulse once zoomed in — skipped over a wide window, where it would be a
+    # solid grey wall rather than a ruler.
     slot_idx_start = int(np.floor((t[0] - frame_start_abs_s) / slot_dur_s))
     slot_idx_end = int(np.ceil((t[-1] - frame_start_abs_s) / slot_dur_s))
-    slot_positions = frame_start_abs_s + np.arange(slot_idx_start, slot_idx_end + 1) * slot_dur_s
+    n_slots = slot_idx_end - slot_idx_start + 1
+    if args.trace_only:
+        slot_positions = None
+    elif n_slots <= _MAX_SLOT_RULER:
+        slot_positions = (
+            frame_start_abs_s + np.arange(slot_idx_start, slot_idx_end + 1) * slot_dur_s
+        )
+    else:
+        slot_positions = None
+        logger.info(
+            "Per-slot ruler skipped: the window spans %d slots (> %d) — narrow it with "
+            "--sections to get it back", n_slots, _MAX_SLOT_RULER,
+        )
+
+    if args.trace_only:
+        # Everything except the trace is something *we* inferred; --trace-only shows the
+        # measurement alone, so you can judge the raw signal without our overlays on top of it.
+        detected_t = detected_t[:0]
+        detected_amp = detected_amp[:0]
+        ideal_samples = ideal_samples[:0]
+        section_bounds = []
 
     fig, ax = plt.subplots(figsize=(14, 5))
     plot_frame_detail(
         ax, t, trace, detected_t, detected_amp, ideal_samples * wf.dt_s,
         ideal_width_s, ideal_amp, section_bounds, slot_positions=slot_positions,
-        title=(
-            f"Frame {idx} sync+metadata — {wf.source.name} "
+        title=figure_title(
+            args,
+            f"Frame {idx} {'+'.join(selected)} — {wf.source.name} "
             f"(sync_found={model.sync_found[idx]}/{frame_params.sync_num}, "
-            f"metadata={metadata_values.astype(int).tolist()})"
+            f"metadata={metadata_values.astype(int).tolist()})",
         ),
     )
 
@@ -245,11 +314,13 @@ def main() -> None:
     fig.savefig(out / "frame_detail.png", dpi=150)
     logger.info("Saved %s", out / "frame_detail.png")
     logger.info(
-        "Frame %d: sync_found=%d/%d, metadata=%s, window=[%d, %d) samples, %d pulses detected "
-        "in window. Zoom/pan the interactive window into individual words to see the ideal-PPM "
-        "shape at native (1-3 sample) resolution — it's invisible at whole-frame zoom.",
-        idx, model.sync_found[idx], frame_params.sync_num,
-        metadata_values.astype(int).tolist(), start_sample, end_sample, int(np.sum(in_window)),
+        "Frame %d %s: words %d-%d, sync_found=%d/%d, metadata=%s, window=[%d, %d) samples, "
+        "%d pulses detected in window. Zoom/pan the interactive window into individual words to "
+        "see the ideal-PPM shape at native (1-3 sample) resolution — it's invisible at "
+        "whole-frame zoom.",
+        idx, "+".join(selected), first_word, last_word - 1, model.sync_found[idx],
+        frame_params.sync_num, metadata_values.astype(int).tolist(), start_sample, end_sample,
+        int(np.sum(in_window)),
     )
 
     if not args.no_show:

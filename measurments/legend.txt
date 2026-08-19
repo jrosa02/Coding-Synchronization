@@ -1,0 +1,3 @@
+measurments/RefCurve_2026-08-18_1_140234.Wfm.csv undersampled 
+measurments/RefCurve_2026-08-18_2_180749.Wfm.csv, wrong clock, sync_value = 0, params =>  --sample-rate 1e9 --combine sub --ppm-rank 10 --dead-slots 16 --sync-num 8 --sync-value 0 --metadata-num 5 --data-num 16 --ecc-num 16 --eof-num 2 --threshold 0.3
+measurments/RefCurve_2026-08-19_0_174114.Wfm.csv, sync_value = 1023, slot clock 12.0002 MHz (16.66642 samples/slot at 2e8 Sa/s, slot_time 83.3321 ns), params =>  --sample-rate 2e8 --samples-per-slot 16.66642 --combine sub --ppm-rank 10 --dead-slots 16 --sync-num 8 --sync-value 1023 --metadata-num 5 --data-num 16 --ecc-num 16 --eof-num 2 --threshold 0.3 --edge edge

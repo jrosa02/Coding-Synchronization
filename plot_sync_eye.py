@@ -1,11 +1,18 @@
-"""Eye-diagram overlay of every sync pulse in a capture, anchored on its own rising edge.
+"""Eye-diagram overlay of every sync pulse in a capture, anchored on the rising edge and on the decoded PPM slot.
 
     python plot_sync_eye.py measurments/RefCurve_....csv --eof-num 2 --threshold 0.3 ...
 
-Every sync-word pulse across every frame is independently re-anchored on its own rising-edge
-crossing (t=0) and overlaid on one axes, colored by the PPM value Syncer decoded for it — should
-all read `sync_value`; a pulse colored off-center from the others decoded wrong. Pulse-shape,
-amplitude, and jitter consistency across the whole capture are all directly visible at once.
+Every sync-word pulse across every frame is overlaid on the same axes, in one style — pulse
+shape, amplitude, and jitter consistency across the whole capture are all directly visible at
+once. How many sync words decoded to something other than `sync_value` is logged, not drawn.
+
+Two panels, same pulses, different t=0:
+
+* anchored on each pulse's own rising-edge crossing — pulse shape and width consistency, with
+  every pulse's own timing error divided out;
+* anchored on the decoded PPM slot position (fitted frame start + word index * word_period +
+  decoded value) — the same traces against the grid the decoder actually placed them on, so the
+  horizontal spread *is* the timing error budget: sub-slot residual plus frame-start fit error.
 """
 
 import argparse
@@ -20,9 +27,11 @@ from coding_synchronization.encoder import FrameParams, ModulationParams
 from coding_synchronization.measurement.Cli import (
     add_extraction_args,
     add_modulation_args,
+    add_title_arg,
     add_verbose_arg,
     add_waveform_args,
     extraction_params,
+    figure_title,
     log_level,
     min_separation_samples,
     slot_time_s,
@@ -47,6 +56,7 @@ def _parse_args() -> argparse.Namespace:
     add_waveform_args(parser)
     add_extraction_args(parser)
     add_modulation_args(parser)
+    add_title_arg(parser)
     add_verbose_arg(parser)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -119,12 +129,17 @@ def main() -> None:
     sync_value = 0 if args.sync_value is None else int(args.sync_value)
 
     t_rel_list: list[np.ndarray] = []
+    t_ppm_list: list[np.ndarray] = []
     trace_list: list[np.ndarray] = []
     decoded_values: list[int] = []
     for idx in range(n):
         abs_chunk = kept_for_sync[idx]
         decoded = model.sync_frames[idx]
         n_sync = min(frame_params.sync_num, len(abs_chunk), len(decoded))
+        # Splitter zeroed this chunk before Syncer saw it, so frame_starts[idx] is frame-local:
+        # re-anchor it on the chunk's first pulse to get the decode grid in absolute time.
+        slot_dur_s = model.inferred_slot_time_s[idx]
+        frame_start_abs_s = float(abs_chunk[0]) * wf.dt_s + model.frame_starts[idx] * slot_dur_s
         for k in range(n_sync):
             approx = float(abs_chunk[k])
             rise = rising_edge_crossing(diff.values, approx, thr, search_radius=2 * half_window)
@@ -132,20 +147,35 @@ def main() -> None:
             hi = min(wf.n, int(np.ceil(rise)) + half_window)
             if hi <= lo:
                 continue
-            t_rel_list.append((np.arange(lo, hi, dtype=np.float64) - rise) * wf.dt_s)
+            samples = np.arange(lo, hi, dtype=np.float64)
+            ideal_s = frame_start_abs_s + (
+                k * model.word_period + float(decoded[k])
+            ) * slot_dur_s
+            t_rel_list.append((samples - rise) * wf.dt_s)
+            t_ppm_list.append(samples * wf.dt_s - ideal_s)
             trace_list.append(diff.values[lo:hi])
             decoded_values.append(int(decoded[k]))
 
     if not t_rel_list:
         raise SystemExit("No sync pulses collected — nothing to plot")
 
-    fig, ax = plt.subplots(figsize=(10, 7))
+    fig, (ax_rise, ax_ppm) = plt.subplots(2, 1, figsize=(11, 12))
     plot_sync_eye(
-        ax, t_rel_list, trace_list, np.array(decoded_values), sync_value,
-        title=(
+        ax_rise, t_rel_list, trace_list,
+        title="Anchored on each pulse's own rising edge (shape and width consistency)",
+    )
+    plot_sync_eye(
+        ax_ppm, t_ppm_list, trace_list,
+        title="Anchored on the decoded PPM slot position (spread = timing error)",
+        xlabel="Time relative to decoded PPM slot position (s)",
+        anchor_label="decoded slot position",
+    )
+    fig.suptitle(
+        figure_title(
+            args,
             f"Sync pulse eye diagram — {wf.source.name} "
-            f"({len(t_rel_list)} pulses across {n} frames)"
-        ),
+            f"({len(t_rel_list)} pulses across {n} frames)",
+        )
     )
 
     out = model.output_dir or Path("output")

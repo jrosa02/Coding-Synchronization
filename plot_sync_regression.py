@@ -30,9 +30,11 @@ from coding_synchronization._logging import setup_logging
 from coding_synchronization.measurement.Cli import (
     add_extraction_args,
     add_modulation_args,
+    add_title_arg,
     add_verbose_arg,
     add_waveform_args,
     extraction_params,
+    figure_title,
     log_level,
     min_separation_samples,
     output_dir,
@@ -55,6 +57,7 @@ def _parse_args() -> argparse.Namespace:
     add_waveform_args(parser)
     add_extraction_args(parser)
     add_modulation_args(parser)
+    add_title_arg(parser)
     add_verbose_arg(parser)
     parser.add_argument(
         "--frame-index", type=int, default=None,
@@ -207,7 +210,9 @@ def main() -> None:
         title = f"Sync residual (calibrated actual − decoded) — {wf.source.name} (chunk {idx})"
 
     fig, ax = plt.subplots(figsize=(11, 6.5))
-    plot_offset_regression(ax, x, y, title=title, ylabel="Actual − decoded (slots)")
+    plot_offset_regression(
+        ax, x, y, title=figure_title(args, title), ylabel="Actual − decoded (slots)"
+    )
 
     fig.tight_layout()
     fig.savefig(out / "sync_regression.png", dpi=150)

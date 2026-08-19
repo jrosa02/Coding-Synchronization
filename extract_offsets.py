@@ -22,8 +22,10 @@ from coding_synchronization._logging import setup_logging
 from coding_synchronization.measurement.Cli import (
     add_extraction_args,
     add_modulation_args,
+    add_title_arg,
     add_verbose_arg,
     add_waveform_args,
+    apply_suptitle,
     extraction_params,
     log_level,
     min_separation_samples,
@@ -50,6 +52,7 @@ def _parse_args() -> argparse.Namespace:
     add_waveform_args(parser)
     add_extraction_args(parser)
     add_modulation_args(parser)
+    add_title_arg(parser)
     add_verbose_arg(parser)
     parser.add_argument("--out", type=str, default=None, help="output .npz path")
     parser.add_argument(
@@ -125,6 +128,7 @@ def main() -> None:
         ax0.legend()
         ax0.grid(True)
         plot_gap_histogram(ax1, slots, split_threshold=split_thr)
+        apply_suptitle(fig, args)
         fig.tight_layout()
         fig.savefig(out_dir / "offsets.png", dpi=150)
         logger.info("Saved %s", out_dir / "offsets.png")
