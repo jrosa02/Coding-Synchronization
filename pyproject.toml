@@ -8,6 +8,7 @@ dependencies = [
     "matplotlib>=3.10.9",
     "numpy>=2.4.6",
     "py-spy>=0.4.2",
+    "reedsolo>=1.7.0",
 ]
 
 [tool.ruff]
@@ -43,6 +44,11 @@ reportArgumentType = "none"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/coding_synchronization"]

@@ -46,7 +46,7 @@ class FrameGen:
 
     @property
     def coarse_sync(self) -> np.ndarray:
-        return np.full(self.sync_num, self.max_value, dtype=np.uint16)
+        return np.zeros(self.sync_num, dtype=np.uint16)
 
     def _fill_sync(self, frames: np.ndarray, s0: int) -> None:
         frames[:, :s0] = self.coarse_sync

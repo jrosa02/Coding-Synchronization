@@ -9,7 +9,7 @@ from coding_synchronization.Model import Model1
 
 setup_logging(level=logging.DEBUG)
 
-mod_params = ModulationParams(ppm_rank=10, slot_time=np.float64(64e-9), dead_slots=8)
+mod_params = ModulationParams(ppm_rank=10, slot_time=np.float64(1.0 / 32.1429e6), dead_slots=8)
 frame_params = FrameParams(sync_num=8, metadata_num=4, data_num=240, ecc_num=4, eof_num=64)
 overflight_params = PassageParams(altitude_km=500.0, max_elevation_deg=90.0)
 channel_params = ChannelParams(
