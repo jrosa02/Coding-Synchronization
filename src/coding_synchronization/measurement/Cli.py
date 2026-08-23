@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 def add_verbose_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "-v", "--verbose", action="store_true",
-        help="enable DEBUG-level logging (pulse gaps, per-frame calibration detail, ...)",
+        help="Write DEBUG messages to the log. These include the pulse gaps and the calibration "
+             "of each frame.",
     )
 
 
@@ -26,8 +27,8 @@ def log_level(args: argparse.Namespace) -> int:
 def add_title_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--title", type=str, default=None,
-        help="custom figure title, replacing the generated one (multi-panel figures get it as a "
-             "suptitle above the per-panel titles)",
+        help="Set the figure title and replace the generated one. On a figure with more than one "
+             "panel, this title goes above all the panels.",
     )
 
 
@@ -49,15 +50,26 @@ def apply_suptitle(fig, args: argparse.Namespace) -> None:
 
 def add_waveform_args(parser: argparse.ArgumentParser) -> None:
     g = parser.add_argument_group("waveform")
-    g.add_argument("path", type=Path, help="two-column differential CSV (R&S RefCurve export)")
+    g.add_argument(
+        "path", type=Path,
+        help="The waveform CSV file. The file holds two differential columns, as the R&S RefCurve "
+             "export does. A single-channel export with a tInc= header line also works.",
+    )
     g.add_argument(
         "--sample-rate", type=float, default=None,
-        help="samples per second; required only if the CSV has no time column",
+        help="The number of samples per second. Give this option only when the CSV has no time "
+             "column.",
     )
-    g.add_argument("--pos-col", type=int, default=None, help="0-based column index of P")
-    g.add_argument("--neg-col", type=int, default=None, help="0-based column index of N")
     g.add_argument(
-        "--max-samples", type=int, default=None, help="load only the first N samples"
+        "--pos-col", type=int, default=None,
+        help="The column index of channel P. The first column is 0.",
+    )
+    g.add_argument(
+        "--neg-col", type=int, default=None,
+        help="The column index of channel N. The first column is 0.",
+    )
+    g.add_argument(
+        "--max-samples", type=int, default=None, help="Load only the first N samples of the file."
     )
 
 
@@ -65,35 +77,44 @@ def add_extraction_args(parser: argparse.ArgumentParser) -> None:
     g = parser.add_argument_group("extraction")
     g.add_argument(
         "--threshold", type=float, default=None,
-        help="detection threshold on the combined pair; default: auto (half amplitude)",
+        help="The detection threshold on the combined signal. The default is half of the pulse "
+             "amplitude, measured from the capture.",
     )
     g.add_argument(
         "--combine", choices=("add", "sub"), default="add",
-        help="how to merge the zero-centred pair: add (scope inverts one leg, default) or sub",
+        help="How to merge the two zero-centred channels. Use add when the measuring device "
+             "inverts one leg. This is the default.",
     )
     g.add_argument(
         "--polarity", choices=("auto", "pos", "neg"), default="auto",
-        help="auto flips the combined signal if its pulses point down",
+        help="The direction of the pulses. auto inverts the combined signal when the pulses point "
+             "down.",
     )
     g.add_argument(
         "--baseline", choices=("median", "mean", "none"), default="median",
-        help="per-channel DC pedestal estimator, removed before combining",
+        help="How to estimate the DC level of each channel. The script removes this level before "
+             "it merges the channels.",
     )
     g.add_argument(
         "--hysteresis", type=float, default=0.5,
-        help="a pulse ends only once it falls below hysteresis*threshold (merges ringing)",
+        help="A pulse ends when the signal falls below hysteresis * threshold. A value below 1 "
+             "merges the ringing into the pulse.",
     )
-    g.add_argument("--min-width", type=int, default=1, help="drop runs narrower than N samples")
+    g.add_argument(
+        "--min-width", type=int, default=1,
+        help="Discard every detection narrower than N samples.",
+    )
     g.add_argument(
         "--min-gap-slots", type=float, default=None,
-        help="merge detections closer than this many slots (same physical pulse); "
-             "must be <= eof_num, which is also the default",
+        help="Merge two detections closer than this many slots into one pulse. The value must be "
+             "less than or equal to eof_num, which is also the default.",
     )
     g.add_argument(
         "--edge", choices=("centroid", "peak", "edge", "rising"), default="centroid",
-        help="pulse position: amplitude-weighted centroid (default), argmax, mean of the "
-             "interpolated rising/falling edge crossings (best for clean, flat-topped pulses), "
-             "or rising-edge crossing only (ignores trailing-edge/width jitter entirely)",
+        help="How to compute the position of a pulse. centroid is the amplitude-weighted centre "
+             "and the default. peak is the highest sample. edge is the mean of the two "
+             "interpolated crossings, which suits clean flat-topped pulses. rising uses the "
+             "rising crossing only, and ignores the width of the pulse.",
     )
 
 
@@ -101,33 +122,55 @@ def add_modulation_args(parser: argparse.ArgumentParser) -> None:
     g = parser.add_argument_group("modulation / framing")
     g.add_argument(
         "--slot-time", type=float, default=1.0 / 32.1429e6,
-        help="PPM slot duration in seconds; default is 1/(serializing clock = 32.1429 MHz)",
+        help="The duration of one PPM slot, in seconds. The default is one period of the "
+             "32.1429 MHz serializing clock.",
     )
     g.add_argument(
         "--samples-per-slot", type=float, default=None,
-        help="samples per PPM slot; overrides --slot-time and makes --sample-rate unnecessary "
-             "(measure it as median_inter_pulse_gap_samples / word_period)",
+        help="The number of samples in one PPM slot. This option replaces --slot-time, and it "
+             "makes --sample-rate unnecessary. To measure it, divide the median pulse gap in "
+             "samples by the word period.",
     )
-    g.add_argument("--ppm-rank", type=int, default=10)
-    g.add_argument("--dead-slots", type=int, default=8)
-    g.add_argument("--sync-num", type=int, default=8)
+    g.add_argument(
+        "--ppm-rank", type=int, default=10,
+        help="One PPM word carries 2^ppm_rank possible values.",
+    )
+    g.add_argument(
+        "--dead-slots", type=int, default=8,
+        help="The number of slots that follow the PPM range of each word.",
+    )
+    g.add_argument(
+        "--sync-num", type=int, default=8, help="The number of sync words in each frame.",
+    )
     g.add_argument(
         "--sync-value", type=int, default=None,
-        help="PPM value carried by each sync word (default: 0). "
-             "Getting this wrong offsets every decoded word by the same amount",
+        help="The PPM value that each sync word carries. The default is 0. A wrong value moves "
+             "every decoded word by the same amount.",
     )
-    g.add_argument("--metadata-num", type=int, default=4)
-    g.add_argument("--data-num", type=int, default=240)
-    g.add_argument("--ecc-num", type=int, default=4)
-    g.add_argument("--eof-num", type=int, default=64)
+    g.add_argument(
+        "--metadata-num", type=int, default=4,
+        help="The number of metadata words in each frame.",
+    )
+    g.add_argument(
+        "--data-num", type=int, default=240, help="The number of data words in each frame.",
+    )
+    g.add_argument(
+        "--ecc-num", type=int, default=4, help="The number of ECC words in each frame.",
+    )
+    g.add_argument(
+        "--eof-num", type=int, default=64,
+        help="The length of the gap between two frames, in words. The splitter cuts the capture "
+             "at every gap longer than eof_num word periods.",
+    )
     g.add_argument(
         "--keep-first-frame", action="store_true",
-        help="keep the first frame; by default it is dropped because the scope trigger "
-             "lands mid-frame, so the capture starts with a fragment",
+        help="Keep the first frame. The script drops it by default, because the trigger of the "
+             "measuring device lands inside a frame and the capture starts with a fragment.",
     )
     g.add_argument(
         "--drop-partial-frames", action="store_true",
-        help="also drop any frame whose pulse count != sync+metadata+data+ecc",
+        help="Also drop every frame that does not hold exactly sync + metadata + data + ecc "
+             "pulses.",
     )
 
 
@@ -192,6 +235,84 @@ def min_gap_slots(args: argparse.Namespace) -> float:
 def min_separation_samples(args: argparse.Namespace, dt_s: float, slot_s: float) -> float:
     """Same bound as min_gap_slots, expressed in samples."""
     return min_gap_slots(args) * slot_s / dt_s
+
+
+def add_slot_calibration_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--no-auto-slot", dest="auto_slot", action="store_false",
+        help="Use --slot-time or --samples-per-slot as given. By default the script measures the "
+             "slot time from the median pulse gap. That measurement keeps the results correct "
+             "when --sample-rate is wrong.",
+    )
+    parser.set_defaults(auto_slot=True)
+
+
+def measured_slot_time_s(
+    offsets_samples: np.ndarray, word_period: float, dt_s: float, assumed_slot_s: float
+) -> float | None:
+    """Slot duration implied by the data: median inter-pulse gap / word_period.
+
+    Every PPM word carries exactly one pulse, so the *typical* gap between consecutive pulses is
+    one word period whatever values are being sent — the PPM value only jitters it either side.
+    The median of that distribution is therefore a direct measurement of the slot duration, in
+    the same sample domain the pulses were found in.
+
+    Returns None when there are too few pulses to measure.
+    """
+    if len(offsets_samples) < 3 or word_period <= 0:
+        return None
+    median_gap = float(np.median(np.diff(np.sort(offsets_samples))))
+    if not np.isfinite(median_gap) or median_gap <= 0.0:
+        return None
+    slot_s = median_gap * dt_s / word_period
+    ratio = slot_s / assumed_slot_s if assumed_slot_s > 0 else float("inf")
+    log = logger.warning if abs(ratio - 1.0) > 0.02 else logger.info
+    log(
+        "Slot time from the data: %.6g s (%.4f samples/slot) vs %.6g s as given — ratio %.4f",
+        slot_s, median_gap / word_period, assumed_slot_s, ratio,
+    )
+    return slot_s
+
+
+def extract_calibrated(
+    diff, wf, ex: ExtractionParams, args: argparse.Namespace
+) -> tuple[object, float, float]:
+    """Extract pulses, then calibrate the slot time against them. Returns (offsets, slot_s, thr).
+
+    Everything downstream is expressed in slot units, and the frame split threshold in particular
+    is `eof_num * word_period` *slots*. So a wrong --slot-time (or a wrong --sample-rate feeding
+    it) moves that threshold in real samples: too small and it cuts inside frames, too large and
+    it never fires — either way the chunks handed to the Syncer are not frames, and every result
+    downstream is meaningless while looking perfectly well-formed. Measuring the slot time from
+    the pulses themselves makes all of it independent of what --sample-rate was guessed at.
+
+    The first extraction still needs *some* slot time for its merge distance, so this runs a
+    second pass whenever the measured value moves that distance materially.
+    """
+    from coding_synchronization.measurement.OffsetExtractor import auto_threshold, extract_offsets
+
+    word_period = float((1 << args.ppm_rank) + args.dead_slots)
+    slot_s = slot_time_s(args, wf.dt_s)
+    ex.min_separation_samples = min_separation_samples(args, wf.dt_s, slot_s)
+    thr = ex.threshold if ex.threshold is not None else auto_threshold(diff.values)
+    offsets = extract_offsets(diff, wf.dt_s, ex, threshold=thr)
+
+    if not getattr(args, "auto_slot", True) or len(offsets.samples) == 0:
+        return offsets, slot_s, thr
+
+    measured = measured_slot_time_s(offsets.samples, word_period, wf.dt_s, slot_s)
+    if measured is None:
+        return offsets, slot_s, thr
+
+    if abs(measured / slot_s - 1.0) > 0.01:
+        # The merge distance was derived from the wrong slot time, so redo the extraction with
+        # the measured one before anything reads the pulse positions.
+        ex.min_separation_samples = min_separation_samples(args, wf.dt_s, measured)
+        offsets = extract_offsets(diff, wf.dt_s, ex, threshold=thr)
+        logger.info(
+            "Re-extracted with the measured slot time: %d pulses", len(offsets.samples)
+        )
+    return offsets, measured, thr
 
 
 def split_threshold(args: argparse.Namespace) -> float:

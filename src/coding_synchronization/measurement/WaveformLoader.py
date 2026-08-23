@@ -1,4 +1,5 @@
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -27,7 +28,7 @@ class CsvFormat:
     header_lines: int
     n_cols: int
     time_col: int | None
-    value_cols: tuple[int, int]
+    value_cols: tuple[int, ...]
     dt_s: float | None
     header_text: list[str] = field(default_factory=list)
 
@@ -72,7 +73,15 @@ def _split(line: str, delimiter: str | None) -> list[str]:
     return line.split(delimiter)
 
 
+def _strip_trailing_empty(fields: list[str]) -> list[str]:
+    """Drop trailing empty fields left by a trailing delimiter (e.g. 'value,,' -> ['value'])."""
+    while fields and fields[-1].strip() == "":
+        fields = fields[:-1]
+    return fields
+
+
 def _all_float(fields: list[str]) -> bool:
+    fields = _strip_trailing_empty(fields)
     if not fields:
         return False
     for f in fields:
@@ -81,6 +90,21 @@ def _all_float(fields: list[str]) -> bool:
         except ValueError:
             return False
     return True
+
+
+_T_INC_RE = re.compile(r"tInc\s*=\s*([-+0-9.eE]+)")
+
+
+def _header_dt_s(header_text: list[str]) -> float | None:
+    """Sample period from a single-channel scope header line (e.g. 'tInc = 2.000000e-06')."""
+    for ln in header_text:
+        m = _T_INC_RE.search(ln)
+        if m:
+            try:
+                return float(m.group(1))
+            except ValueError:
+                continue
+    return None
 
 
 def _is_time_axis(col: np.ndarray) -> bool:
@@ -103,18 +127,19 @@ def sniff_format(path: Path) -> CsvFormat:
 
     best: tuple[int, str | None, int] = (0, ",", 0)  # (n_cols, delimiter, n_consistent)
     for delim in _DELIMITERS:
-        counts = [len(_split(ln, delim)) for ln in lines if _all_float(_split(ln, delim))]
+        stripped = [_strip_trailing_empty(_split(ln, delim)) for ln in lines]
+        counts = [len(f) for f in stripped if _all_float(f)]
         if not counts:
             continue
         n_cols = max(set(counts), key=counts.count)
         n_consistent = counts.count(n_cols)
-        if n_cols >= 2 and (n_cols, n_consistent) > (best[0], best[2]):
+        if n_cols >= 1 and (n_cols, n_consistent) > (best[0], best[2]):
             best = (n_cols, delim, n_consistent)
 
     n_cols, delimiter, _ = best
-    if n_cols < 2:
+    if n_cols < 1:
         raise ValueError(
-            f"Could not find at least 2 numeric columns in {path}. "
+            f"Could not find at least 1 numeric column in {path}. "
             f"First line was: {lines[0][:120]!r}"
         )
 
@@ -125,7 +150,7 @@ def sniff_format(path: Path) -> CsvFormat:
         header_lines += 1
     header_text = [ln.strip() for ln in raw[:header_lines] if ln.strip()]
 
-    rows = [_split(ln, delimiter) for ln in lines]
+    rows = [_strip_trailing_empty(_split(ln, delimiter)) for ln in lines]
     data = np.array(
         [[float(x) for x in r] for r in rows if len(r) == n_cols and _all_float(r)],
         dtype=np.float64,
@@ -138,13 +163,15 @@ def sniff_format(path: Path) -> CsvFormat:
         dt_s = float(np.median(np.diff(data[:, 0])))
 
     value_cols_all = [c for c in range(n_cols) if c != time_col]
-    if len(value_cols_all) < 2:
+    if len(value_cols_all) < 1:
         raise ValueError(
-            f"{path} has {n_cols} columns of which column 0 looks like a time axis, leaving only "
-            f"{len(value_cols_all)} value column(s). A differential pair needs 2 — pass explicit "
-            f"--pos-col/--neg-col if the auto-detection is wrong."
+            f"{path} has {n_cols} columns of which column 0 looks like a time axis, leaving no "
+            f"value columns. Pass explicit --pos-col/--neg-col if the auto-detection is wrong."
         )
-    value_cols = (value_cols_all[0], value_cols_all[1])
+    value_cols = tuple(value_cols_all[:2])
+
+    if dt_s is None:
+        dt_s = _header_dt_s(header_text)
 
     fmt = CsvFormat(
         delimiter=delimiter,
@@ -166,8 +193,11 @@ def load_waveform(params: WaveformParams) -> Waveform:
     fmt = sniff_format(path)
 
     pos_col = params.pos_col if params.pos_col is not None else fmt.value_cols[0]
-    neg_col = params.neg_col if params.neg_col is not None else fmt.value_cols[1]
-    if pos_col == neg_col:
+    single_channel = params.neg_col is None and len(fmt.value_cols) < 2
+    neg_col = params.neg_col if params.neg_col is not None else (
+        None if single_channel else fmt.value_cols[1]
+    )
+    if not single_channel and pos_col == neg_col:
         raise ValueError(f"pos_col and neg_col must differ (both are {pos_col})")
 
     dt_s = fmt.dt_s
@@ -185,21 +215,27 @@ def load_waveform(params: WaveformParams) -> Waveform:
         )
 
     logger.info(
-        "Loading %s (cols %d,%d, skiprows=%d, max_rows=%s) ...",
-        path.name, pos_col, neg_col, fmt.header_lines, params.max_samples,
+        "Loading %s (cols %s, skiprows=%d, max_rows=%s) ...",
+        path.name, pos_col if single_channel else f"{pos_col},{neg_col}",
+        fmt.header_lines, params.max_samples,
     )
+    usecols = (pos_col,) if single_channel else (pos_col, neg_col)
     arr = np.loadtxt(
         path,
         delimiter=fmt.delimiter,
         skiprows=fmt.header_lines,
-        usecols=(pos_col, neg_col),
+        usecols=usecols,
         max_rows=params.max_samples,
         dtype=np.float32,
         ndmin=2,
     )
+    ch_a = np.ascontiguousarray(arr[:, 0])
+    ch_b = np.zeros_like(ch_a) if single_channel else np.ascontiguousarray(arr[:, 1])
+    if single_channel:
+        logger.info("Single-channel capture (no second column) — ch_b synthesized as zeros")
     wf = Waveform(
-        ch_a=np.ascontiguousarray(arr[:, 0]),
-        ch_b=np.ascontiguousarray(arr[:, 1]),
+        ch_a=ch_a,
+        ch_b=ch_b,
         dt_s=float(dt_s),
         fmt=fmt,
         source=path,

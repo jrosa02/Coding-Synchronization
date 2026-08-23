@@ -1,11 +1,13 @@
-"""Visualize a two-column differential scope capture.
+"""Draw a capture, its combined signal, and the distribution of its pulse gaps.
 
     python visualize_measurement.py measurments/RefCurve_2026-08-18_0_124555.Wfm.csv
 
-Prints the sniffed CSV format, then plots the raw pair, the zero-centred pair, the combined signal
-(added by default — the measuring device inverts one leg) with the detection threshold and the
-extracted pulse centroids, and the inter-pulse gap histogram in slot units (the plot that says
-whether frame splitting will work).
+The script prints the CSV format it found. It then draws five panels: the raw channels, the
+zero-centred channels, the combined signal with its threshold and its detected pulses, a zoom into
+the start of the capture, and a histogram of the pulse gaps in slots.
+
+Read the histogram first. It shows whether the gaps between frames separate from the gaps inside a
+frame, and that separation is what the frame splitting needs.
 """
 
 import argparse
@@ -19,22 +21,19 @@ from coding_synchronization._logging import setup_logging
 from coding_synchronization.measurement.Cli import (
     add_extraction_args,
     add_modulation_args,
+    add_slot_calibration_arg,
     add_title_arg,
     add_verbose_arg,
     add_waveform_args,
     apply_suptitle,
+    extract_calibrated,
     extraction_params,
     log_level,
     output_dir,
-    slot_time_s,
     split_threshold,
     waveform_params,
 )
-from coding_synchronization.measurement.OffsetExtractor import (
-    auto_threshold,
-    differential,
-    extract_offsets,
-)
+from coding_synchronization.measurement.OffsetExtractor import differential
 from coding_synchronization.measurement.Plotting import plot_gap_histogram, plot_trace
 from coding_synchronization.measurement.WaveformLoader import load_waveform
 
@@ -48,14 +47,21 @@ def _parse_args() -> argparse.Namespace:
     add_waveform_args(parser)
     add_extraction_args(parser)
     add_modulation_args(parser)
+    add_slot_calibration_arg(parser)
     add_title_arg(parser)
     add_verbose_arg(parser)
-    parser.add_argument("--zoom-start", type=float, default=0.0, help="zoom window start, seconds")
+    parser.add_argument(
+        "--zoom-start", type=float, default=0.0,
+        help="The start of the zoom window, in seconds.",
+    )
     parser.add_argument(
         "--zoom-span", type=float, default=None,
-        help="zoom window width in seconds; default: 20 word periods",
+        help="The width of the zoom window, in seconds. The default is 20 word periods.",
     )
-    parser.add_argument("--no-show", action="store_true", help="save the figure without plt.show()")
+    parser.add_argument(
+        "--no-show", action="store_true",
+        help="Save the figure, and do not open a window.",
+    )
     return parser.parse_args()
 
 
@@ -66,19 +72,20 @@ def main() -> None:
     wf = load_waveform(waveform_params(args))
     ex = extraction_params(args)
     diff = differential(wf, ex)
-    thr = ex.threshold if ex.threshold is not None else auto_threshold(diff.values)
-    offsets = extract_offsets(diff, wf.dt_s, ex, threshold=thr)
-    slot_s = slot_time_s(args, wf.dt_s)
+    offsets, slot_s, thr = extract_calibrated(diff, wf, ex, args)
     slots = offsets.to_slots(slot_s)
 
     word_period = (1 << args.ppm_rank) + args.dead_slots
     col_a = args.pos_col if args.pos_col is not None else wf.fmt.value_cols[0]
-    col_b = args.neg_col if args.neg_col is not None else wf.fmt.value_cols[1]
+    single_channel = args.neg_col is None and len(wf.fmt.value_cols) < 2
+    col_b_label = "synthesized zeros" if single_channel else (
+        f"col {args.neg_col if args.neg_col is not None else wf.fmt.value_cols[1]} (B)"
+    )
     op = "+" if ex.combine == "add" else "−"
     fig, (ax0, ax1, ax2, ax3, ax4) = plt.subplots(5, 1, figsize=(12, 17))
 
     plot_trace(ax0, wf.ch_a, wf.dt_s, label=f"col {col_a} (A)")
-    plot_trace(ax0, wf.ch_b, wf.dt_s, label=f"col {col_b} (B)")
+    plot_trace(ax0, wf.ch_b, wf.dt_s, label=col_b_label)
     ax0.set_title(f"Raw channels — {wf.source.name} ({wf.n} samples, {wf.duration_s:.6g} s)")
     ax0.set_xlabel("Time (s)")
     ax0.set_ylabel("Amplitude")

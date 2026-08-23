@@ -62,12 +62,19 @@ def plot_gap_histogram(
 
 
 def plot_offset_regression(
-    ax: Axes, x: np.ndarray, y: np.ndarray, title: str | None = None, ylabel: str = "Offset (slots)"
+    ax: Axes, x: np.ndarray, y: np.ndarray, title: str | None = None, ylabel: str = "Offset (slots)",
+    frame_words: int | None = None,
 ) -> None:
     """`y` (raw offsets, or a residual against some assumed decode) vs. its natural index `x`,
     with an OLS line fit and a shaded standard-error band — visualizes exactly what Pass-1
     calibration does. The fitted x=0 intercept is marked with its own uncertainty, not pinned to
     0: it's expected to hover near zero, not be forced there.
+
+    The fitted slope is reported with its own uncertainty and, when `frame_words` is given,
+    extrapolated over a whole frame. A residual tilt only matters by how much it accumulates
+    before the last word of the frame — and the axes autoscale to a residual spread of a few
+    hundredths of a slot, so any slope at all draws as a dramatic diagonal without that number
+    next to it.
     """
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
@@ -92,6 +99,7 @@ def plot_offset_regression(
     dof = n - 2
     s2 = float(np.sum(resid**2) / dof) if dof > 0 else 0.0
     intercept_se = math.sqrt(s2 * (1.0 / n + xbar**2 / sxx))
+    slope_se = math.sqrt(s2 / sxx)
 
     x_fit = np.linspace(min(0.0, x.min()), x.max(), 200)
     y_fit = slope * x_fit + intercept
@@ -115,8 +123,17 @@ def plot_offset_regression(
     # Fixed corner, not anchored to the data point: the intercept can land anywhere in the
     # y-range (including right under the title), so tying the label's position to it directly
     # risks exactly that overlap.
+    lines = [
+        f"intercept = {intercept:.4g} ± {intercept_se:.4g} slots (not fixed to 0)",
+        f"slope = {slope:.3g} ± {slope_se:.2g} slots/word",
+    ]
+    if frame_words:
+        lines.append(
+            f"  → {slope * frame_words:+.3g} slots accumulated over {frame_words} words "
+            f"(decision boundary ±0.5)"
+        )
     ax.text(
-        0.02, 0.02, f"intercept = {intercept:.4g} ± {intercept_se:.4g} slots\n(not fixed to 0)",
+        0.02, 0.02, "\n".join(lines),
         transform=ax.transAxes, fontsize=8, va="bottom", ha="left",
         bbox=dict(boxstyle="round", facecolor="white", alpha=0.8, edgecolor="0.7"),
     )

@@ -1,10 +1,14 @@
-"""Feed measured pulse offsets into the existing decoding pipeline.
+"""Decode measured pulse offsets into frames, and check the frames against their ECC.
 
     python decode_measurement.py output/<ts>/offsets.npz --ppm-rank 10 --dead-slots 8
-    python decode_measurement.py measurments/RefCurve_....csv --threshold 0.05   # one-shot
+    python decode_measurement.py measurments/RefCurve_....csv --threshold 0.05   # one command
 
-Builds MeasurementGen -> Splitter -> Syncer -> MetadataCheck -> Collector via Model2 and writes the
-usual output/<timestamp>/ artifacts (run.log, pipeline.txt, params.json, decoded.npz).
+The script builds the pipeline MeasurementGen -> Splitter -> Syncer -> MetadataCheck -> Collector
+through Model2. It prints every decoded word of each frame, together with the sync diagnostics.
+It writes the usual output/<timestamp>/ files: run.log, pipeline.txt, params.json and decoded.npz.
+
+--check-ecc decodes each frame as a Reed-Solomon codeword and reports the error rates before and
+after correction. docs/measurement.md describes that check.
 """
 
 import argparse
@@ -16,25 +20,24 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from coding_synchronization._logging import setup_logging
+from coding_synchronization.decoder.Ecc import EccParams, EccReport
 from coding_synchronization.encoder import FrameParams, ModulationParams
 from coding_synchronization.measurement.Cli import (
     add_extraction_args,
     add_modulation_args,
+    add_slot_calibration_arg,
     add_title_arg,
     add_verbose_arg,
     add_waveform_args,
     apply_suptitle,
+    extract_calibrated,
     extraction_params,
     log_level,
-    min_separation_samples,
-    slot_time_s,
     waveform_params,
 )
 from coding_synchronization.measurement.OffsetExtractor import (
     ExtractionParams,
-    auto_threshold,
     differential,
-    extract_offsets,
     load_offsets,
 )
 from coding_synchronization.measurement.Plotting import frame_sections, plot_frame_sections
@@ -49,13 +52,50 @@ def _parse_args() -> argparse.Namespace:
     add_waveform_args(parser)
     add_extraction_args(parser)
     add_modulation_args(parser)
+    add_slot_calibration_arg(parser)
     add_title_arg(parser)
     add_verbose_arg(parser)
-    parser.add_argument("--plot", action="store_true", help="render per-stage tables")
+    g = parser.add_argument_group("error correction")
+    g.add_argument(
+        "--check-ecc", action="store_true",
+        help="Decode every frame as a Reed-Solomon codeword. The report gives the word error "
+             "rate and the bit error rate before and after correction. The metadata words and "
+             "the data words carry the information. The ECC words carry the parity. One PPM word "
+             "is one GF(2^ppm_rank) symbol.",
+    )
+    g.add_argument(
+        "--rs-fcr", type=int, default=0,
+        help="The first consecutive root of the RS code. The default is 0.",
+    )
+    g.add_argument(
+        "--rs-generator", type=int, default=2,
+        help="The generator element of the RS code. The default is 2.",
+    )
+    g.add_argument(
+        "--check-metadata", action="store_true",
+        help="Verify that the metadata words of each frame form a consecutive counter. The stage "
+             "counts the mismatches and logs them. It runs after the ECC decoding, so it reads "
+             "corrected words.",
+    )
+    g.add_argument(
+        "--strict-metadata", action="store_true",
+        help="Stop the run at the first metadata mismatch. This also verifies that the counter "
+             "continues from one frame to the next.",
+    )
+    g.add_argument(
+        "--rs-prim", type=lambda v: int(v, 0), default=None,
+        help="The primitive polynomial of the RS field, for example 0x409 for GF(2^10). The "
+             "default comes from --ppm-rank.",
+    )
+    parser.add_argument(
+        "--plot", action="store_true",
+        help="Draw one table for each pipeline stage, and one figure for each frame.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--max-frames", type=int, default=None,
-        help="only print the first N frames (all frames are still saved to decoded.txt)",
+        help="Print only the first N frames. The script still saves every frame to "
+             "decoded.txt.",
     )
     return parser.parse_args()
 
@@ -74,10 +114,7 @@ def _offsets_from(args: argparse.Namespace) -> tuple[
     wf = load_waveform(wp)
     ex = extraction_params(args)
     diff = differential(wf, ex)
-    slot_s = slot_time_s(args, wf.dt_s)
-    ex.min_separation_samples = min_separation_samples(args, wf.dt_s, slot_s)
-    thr = ex.threshold if ex.threshold is not None else auto_threshold(diff.values)
-    offsets = extract_offsets(diff, wf.dt_s, ex, threshold=thr)
+    offsets, slot_s, _thr = extract_calibrated(diff, wf, ex, args)
     return offsets.to_slots(slot_s), slot_s, ex, wp
 
 
@@ -138,6 +175,51 @@ def _save_frame_sections(
     logger.info("Saved %s", out_dir / "frame_sections.xml")
 
 
+def _print_ecc_report(report: EccReport) -> None:
+    """Frame-by-frame RS verdict, then the rates either side of correction."""
+    p = report.params
+    rates = report.rates()
+    print(f"\nECC check — RS({p.n},{p.info_num}) over GF(2^{p.ppm_rank}), "
+          f"corrects up to {p.correctable} symbols/frame")
+    for f in report.frames:
+        if not f.ok:
+            print(f"  frame {f.index:3d}: UNCORRECTABLE")
+        elif f.symbol_errors:
+            print(f"  frame {f.index:3d}: corrected {f.symbol_errors} symbols "
+                  f"({f.bit_errors} bits) at {f.positions}")
+    clean = sum(1 for f in report.frames if f.ok and f.symbol_errors == 0)
+    print(f"  {report.n_frames} frames: {clean} clean, "
+          f"{report.n_frames - clean - report.n_uncorrectable} corrected, "
+          f"{report.n_uncorrectable} uncorrectable")
+    print(f"  {'':14} {'WER (symbol)':>14} {'BER (bit)':>14}")
+    print(f"  {'before ECC':14} {rates['wer_pre']:>14.3e} {rates['ber_pre']:>14.3e}")
+    print(f"  {'after ECC':14} {rates['wer_post']:>14.3e} {rates['ber_post']:>14.3e}")
+    print(f"  frame error rate (uncorrectable frames): {report.frame_error_rate:.3e}")
+
+
+def _save_ecc_report(report: EccReport, out_dir: Path) -> None:
+    p = report.params
+    rates = report.rates()
+    root = ET.Element(
+        "ecc_report", n=str(p.n), k=str(p.info_num), ppm_rank=str(p.ppm_rank),
+        ecc_num=str(p.ecc_num), fcr=str(p.fcr), generator=str(p.generator),
+        correctable=str(p.correctable), frames=str(report.n_frames),
+        uncorrectable=str(report.n_uncorrectable),
+        frame_error_rate=f"{report.frame_error_rate:.6e}",
+        **{k: f"{v:.6e}" for k, v in rates.items()},
+    )
+    for f in report.frames:
+        ET.SubElement(
+            root, "frame", index=str(f.index), ok=str(f.ok).lower(),
+            symbol_errors=str(f.symbol_errors), bit_errors=str(f.bit_errors),
+            positions=" ".join(str(j) for j in f.positions),
+        )
+    tree = ET.ElementTree(root)
+    ET.indent(tree, space="  ")
+    tree.write(out_dir / "ecc_report.xml", encoding="utf-8", xml_declaration=True)
+    logger.info("Saved %s", out_dir / "ecc_report.xml")
+
+
 def main() -> None:
     args = _parse_args()
     setup_logging(level=log_level(args))
@@ -160,6 +242,19 @@ def main() -> None:
         eof_num=args.eof_num,
     )
 
+    ecc_params = None
+    if args.check_ecc:
+        # The codeword is the frame minus its sync words: metadata + data carry the information,
+        # the ecc words are the parity over both.
+        ecc_params = EccParams(
+            ppm_rank=args.ppm_rank,
+            ecc_num=args.ecc_num,
+            info_num=args.metadata_num + args.data_num,
+            fcr=args.rs_fcr,
+            generator=args.rs_generator,
+            prim=args.rs_prim,
+        )
+
     model = Model2(
         offsets=slots,
         frame_params=frame_params,
@@ -171,12 +266,19 @@ def main() -> None:
         drop_wrong_length=args.drop_partial_frames,
         plot=args.plot,
         seed=args.seed,
+        ecc_params=ecc_params,
+        verify_metadata=args.check_metadata,
+        strict_metadata=args.strict_metadata,
     )
     model.construct_pipeline()
     model.run()
 
     if args.plot:
         _save_frame_sections(model, frame_params, args)
+
+    if model.ecc_report is not None:
+        _print_ecc_report(model.ecc_report)
+        _save_ecc_report(model.ecc_report, model.output_dir or Path("output"))
 
     frames = model.decoded_frames_with_metadata
     meta_num = args.metadata_num

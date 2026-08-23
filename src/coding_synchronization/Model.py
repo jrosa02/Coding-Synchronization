@@ -17,6 +17,7 @@ from coding_synchronization.channel import (
     RandomShift,
     VanishPulses,
 )
+from coding_synchronization.decoder.Ecc import EccDecode, EccParams, EccReport
 from coding_synchronization.decoder.Metadata import MetadataCheck
 from coding_synchronization.decoder.Splitter import Splitter
 from coding_synchronization.decoder.Syncer import Syncer
@@ -59,6 +60,36 @@ class ModelABC(abc.ABC):
     def reset(self) -> None:
         self.runner.reset()
 
+    def _report_ecc(self, report: EccReport) -> None:
+        """Log the RS verdict and the error rates either side of it."""
+        rates = report.rates()
+        clean = sum(1 for f in report.frames if f.ok and f.symbol_errors == 0)
+        corrected = sum(1 for f in report.frames if f.ok and f.symbol_errors > 0)
+        logger.info(
+            "ECC: %d frames checked — %d clean, %d corrected, %d uncorrectable",
+            report.n_frames, clean, corrected, report.n_uncorrectable,
+        )
+        logger.info(
+            "ECC: before decoding WER=%.3e BER=%.3e | after decoding WER=%.3e BER=%.3e | "
+            "frame error rate=%.3e",
+            rates["wer_pre"], rates["ber_pre"], rates["wer_post"], rates["ber_post"],
+            report.frame_error_rate,
+        )
+        if report.n_uncorrectable:
+            logger.warning(
+                "ECC: %d/%d frames exceeded the %d-symbol correction limit — the pre-ECC rates "
+                "above are lower bounds", report.n_uncorrectable, report.n_frames,
+                report.params.correctable,
+            )
+
+    def _report_metadata(self, stage: MetadataCheck | None) -> None:
+        if stage is None or not stage.verify or stage.frames_checked == 0:
+            return
+        logger.info(
+            "Metadata: %d frames checked, %d mismatches (rate=%.3e)",
+            stage.frames_checked, stage.mismatches, stage.mismatch_rate,
+        )
+
 
 class Model1(ModelABC):
     def __init__(
@@ -80,6 +111,11 @@ class Model1(ModelABC):
         self.plot = plot
         self._gen: PassageGen | None = None
         self._collector: Collector | None = None
+        self._synced: Collector | None = None
+        self._corrected: Collector | None = None
+        self._ecc: EccDecode | None = None
+        self._metadata: MetadataCheck | None = None
+        self.ecc_report: EccReport | None = None
 
     def construct_pipeline(self) -> None:
         stage_names = [
@@ -127,11 +163,16 @@ class Model1(ModelABC):
         )
         self.runner.append(self._gen)
         maybe_plot(0)
+        # Each impairment runs only when its ChannelParams field is set. The stages raise on a
+        # rate of None, which is why these lines used to be commented out. channel/Channel.py
+        # gates the same way.
         cp = self.channel_params
-        # self.runner.append(VanishPulses(rate=cp.vanish_rate))
-        # maybe_plot(1)
-        self.runner.append(RandomShift(sigma=cp.sigma))
-        maybe_plot(2)
+        if cp.vanish_rate is not None:
+            self.runner.append(VanishPulses(rate=cp.vanish_rate))
+            maybe_plot(1)
+        if cp.sigma is not None:
+            self.runner.append(RandomShift(sigma=cp.sigma))
+            maybe_plot(2)
         self.runner.append(
             DopplerShift(
                 altitude_km=self.overflight_params.altitude_km,
@@ -140,17 +181,38 @@ class Model1(ModelABC):
             )
         )
         maybe_plot(3)
-        self.runner.append(ConstantOffset(self.channel_params.max_const_offset))
-        maybe_plot(4)
-        # self.runner.append(AddedPulses(rate=cp.added_rate))
-        # maybe_plot(5)
+        if cp.max_const_offset is not None:
+            self.runner.append(ConstantOffset(cp.max_const_offset))
+            maybe_plot(4)
+        if cp.added_rate is not None:
+            self.runner.append(AddedPulses(rate=cp.added_rate))
+            maybe_plot(5)
         word_period = (1 << self.mod_params.ppm_rank) + self.mod_params.dead_slots
         threshold = self.frame_params.eof_num * word_period
         self.runner.append(Splitter(threshold))
         maybe_plot(6)
         self.runner.append(Syncer(self.mod_params, self.frame_params.sync_num))
         maybe_plot(7)
-        self.runner.append(MetadataCheck(self.frame_params.metadata_num))
+        # The words as received, before the ECC corrects them.
+        self._synced = Collector("synced")
+        self.runner.append(self._synced)
+        fp = self.frame_params
+        if fp.ecc_num > 0:
+            # FrameGen writes real parity, so the ECC can always run here. It runs first, so the
+            # metadata check below tests corrected words.
+            self._ecc = EccDecode(
+                EccParams(
+                    ppm_rank=self.mod_params.ppm_rank,
+                    ecc_num=fp.ecc_num,
+                    info_num=fp.metadata_num + fp.data_num,
+                )
+            )
+            self.runner.append(self._ecc)
+            self._corrected = Collector("corrected")
+            self.runner.append(self._corrected)
+        # FrameGen writes the metadata counter, so the simulation can verify it.
+        self._metadata = MetadataCheck(fp.metadata_num, verify=True)
+        self.runner.append(self._metadata)
         maybe_plot(8)
         self._collector = Collector("payload")
         self.runner.append(self._collector)
@@ -168,6 +230,11 @@ class Model1(ModelABC):
 
         self._gen.load(self.data)
         self.runner.run()
+
+        if self._ecc is not None:
+            self.ecc_report = self._ecc.report()
+            self._report_ecc(self.ecc_report)
+        self._report_metadata(self._metadata)
 
         for i, fig in enumerate(self._figures):
             fig.tight_layout()
@@ -213,9 +280,18 @@ class Model2(ModelABC):
         drop_wrong_length: bool = False,
         plot: bool = False,
         seed: int = 42,
+        ecc_params: EccParams | None = None,
+        verify_metadata: bool = False,
+        strict_metadata: bool = False,
     ) -> None:
         super().__init__(seed=seed)
         self.offsets = np.asarray(offsets, dtype=np.float64)
+        # When set, an EccDecode stage corrects every frame before the metadata check reads it,
+        # and the result is kept here.
+        self.ecc_params = ecc_params
+        self.ecc_report: EccReport | None = None
+        self.verify_metadata = verify_metadata or strict_metadata
+        self.strict_metadata = strict_metadata
         self.sync_value = sync_value
         self.drop_first_frame = drop_first_frame
         self.drop_wrong_length = drop_wrong_length
@@ -227,8 +303,11 @@ class Model2(ModelABC):
         self._gen: MeasurementGen | None = None
         self._collector: Collector | None = None
         self._synced: Collector | None = None
+        self._corrected: Collector | None = None
         self._split: Collector | None = None
         self._syncer: Syncer | None = None
+        self._ecc: EccDecode | None = None
+        self._metadata: MetadataCheck | None = None
         self.output_dir: Path | None = None
 
     def construct_pipeline(self) -> None:
@@ -271,7 +350,20 @@ class Model2(ModelABC):
         self._synced = Collector("synced")
         self.runner.append(self._synced)
         maybe_plot(3)
-        self.runner.append(MetadataCheck(self.frame_params.metadata_num))
+        if self.ecc_params is not None:
+            # RS decoding is the first step of the decode path, so the metadata check below reads
+            # corrected words. It stays opt-in: without the transmitter's RS parameters every
+            # frame would read as uncorrectable.
+            self._ecc = EccDecode(self.ecc_params)
+            self.runner.append(self._ecc)
+            self._corrected = Collector("corrected")
+            self.runner.append(self._corrected)
+        self._metadata = MetadataCheck(
+            self.frame_params.metadata_num,
+            verify=self.verify_metadata,
+            strict=self.strict_metadata,
+        )
+        self.runner.append(self._metadata)
         maybe_plot(4)
         self._collector = Collector("payload")
         self.runner.append(self._collector)
@@ -316,6 +408,11 @@ class Model2(ModelABC):
             "Decoded %d frames, %d payload symbols (%d including metadata)",
             len(frames), len(symbols), len(all_symbols),
         )
+
+        if self._ecc is not None:
+            self.ecc_report = self._ecc.report()
+            self._report_ecc(self.ecc_report)
+        self._report_metadata(self._metadata)
 
         for i, fig in enumerate(self._figures):
             fig.tight_layout()

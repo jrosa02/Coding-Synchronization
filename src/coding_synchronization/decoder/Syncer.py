@@ -55,16 +55,22 @@ class Syncer(StageABC):
             sync_num, self.word_period, self.margin, self.sync_value,
         )
 
-    def _locate_sync(self, pos: np.ndarray) -> tuple[np.ndarray, int, float]:
+    def _locate_sync(self, pos: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+        """Locate the sync pulses in `pos`, returning (positions, found_mask, frame_start).
+
+        Where no pulse is found the expected position is filled in instead, so `found_mask` is the
+        only way to tell a real pulse from an assumed one — the scale refinement in `_sync_frame`
+        must fit against real pulses only.
+        """
         anchor = pos[0]
         sync_pos = np.empty(self.sync_num, dtype=np.float64)
-        found = 0
+        found_mask = np.zeros(self.sync_num, dtype=bool)
         for k in range(self.sync_num):
             expected = anchor + k * self.word_period
             candidates = pos[np.abs(pos - expected) <= self.margin]
             if len(candidates) > 0:
                 sync_pos[k] = candidates[np.argmin(np.abs(candidates - expected))]
-                found += 1
+                found_mask[k] = True
             else:
                 sync_pos[k] = expected
 
@@ -72,7 +78,39 @@ class Syncer(StageABC):
         frame_start = (
             float(np.mean(sync_pos - np.arange(self.sync_num) * self.word_period)) - self.sync_value
         )
-        return sync_pos, found, frame_start
+        return sync_pos, found_mask, frame_start
+
+    def _refine_scale(
+        self, sync_pos: np.ndarray, found_mask: np.ndarray, scale_coarse: float
+    ) -> float:
+        """Least-squares slot-time scale from the located sync pulses, or `scale_coarse`.
+
+        The coarse scale is the median sync-to-sync gap, which is robust to a missing pulse (that
+        doubles one gap and the median shrugs it off) but biased: the median of a handful of noisy
+        gaps is not the least-squares slope, and the difference shows up as a residual tilt that
+        accumulates over the frame — parts per million of scale error become a fraction of a slot
+        by the last word. Fitting position against *word index* removes the bias while keeping the
+        robustness, because a pulse that was never found is simply left out of the fit rather than
+        collapsing two words into one gap.
+        """
+        if int(found_mask.sum()) < 3:
+            return scale_coarse
+        # Back to raw (uncalibrated) units: the coarse step was a pure scaling, so this is exact.
+        raw = sync_pos[found_mask] * scale_coarse
+        k = np.arange(self.sync_num, dtype=np.float64)[found_mask]
+        slope = float(np.polyfit(k, raw, 1)[0])
+        scale = slope / self.word_period
+        if not np.isfinite(scale) or scale <= 0.0:
+            return scale_coarse
+        # A mis-located pulse must not be able to wreck the frame: the refinement corrects parts
+        # per million, so anything beyond a percent is a bad fit, not a better calibration.
+        if abs(scale / scale_coarse - 1.0) > 0.01:
+            logger.debug(
+                "Syncer: rejecting refined scale %.9g (coarse %.9g) — off by more than 1%%",
+                scale, scale_coarse,
+            )
+            return scale_coarse
+        return scale
 
     def _decode_positions(
         self, pos: np.ndarray, frame_start: float
@@ -119,19 +157,27 @@ class Syncer(StageABC):
             with np.errstate(invalid="ignore", divide="ignore"):
                 error_metric = np.log(gap_ratio.std() * 3 * (self.max_value + 1) / gap_ratio.mean())
             logger.debug("Syncer: gap-jitter error metric = %.6g", error_metric)
-        scale = float(np.median(head_gaps)) / self.word_period if len(head_gaps) > 0 else 1.0
-        if not np.isfinite(scale) or scale <= 0.0:
-            scale = 1.0
-        pos = pos_raw / scale
-        sync_pos, found, frame_start = self._locate_sync(pos)
+        scale_coarse = float(np.median(head_gaps)) / self.word_period if len(head_gaps) > 0 else 1.0
+        if not np.isfinite(scale_coarse) or scale_coarse <= 0.0:
+            scale_coarse = 1.0
+        # Pass 1a: coarse, median-based, robust enough to locate every sync pulse. Pass 1b: refit
+        # the scale against the located pulses' word indices, which removes the median's bias.
+        pos = pos_raw / scale_coarse
+        sync_pos, found_mask, frame_start = self._locate_sync(pos)
+        scale = self._refine_scale(sync_pos, found_mask, scale_coarse)
+        if scale != scale_coarse:
+            pos = pos_raw / scale
+            sync_pos, found_mask, frame_start = self._locate_sync(pos)
+        found = int(found_mask.sum())
 
         self._last_scale = scale
         self._last_calibrated_positions = pos
         if abs(scale - 1.0) > 1e-9:
             logger.debug(
-                "Syncer: slot-time calibration scale=%.6g -> inferred slot_time=%.6g s "
-                "(nominal was %.6g s)",
-                scale, self.nominal_slot_time_s * scale, self.nominal_slot_time_s,
+                "Syncer: slot-time calibration scale=%.9g (coarse %.9g, %d/%d sync pulses in the "
+                "refit) -> inferred slot_time=%.6g s (nominal was %.6g s)",
+                scale, scale_coarse, found, self.sync_num,
+                self.nominal_slot_time_s * scale, self.nominal_slot_time_s,
             )
 
         # Decode the sync words with the same rule as the data words, so they can be printed.

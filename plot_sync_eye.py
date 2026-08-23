@@ -1,18 +1,18 @@
-"""Eye-diagram overlay of every sync pulse in a capture, anchored on the rising edge and on the decoded PPM slot.
+"""Overlay every sync pulse of a capture into two eye diagrams.
 
     python plot_sync_eye.py measurments/RefCurve_....csv --eof-num 2 --threshold 0.3 ...
 
-Every sync-word pulse across every frame is overlaid on the same axes, in one style — pulse
-shape, amplitude, and jitter consistency across the whole capture are all directly visible at
-once. How many sync words decoded to something other than `sync_value` is logged, not drawn.
+The script accumulates the pulses into a density map, as the persistence display of an
+oscilloscope does. The colour of a bin gives the number of traces that pass through it, so the
+common path stands out and a single stray trace stays dark. The script logs the number of sync
+words that decoded to a value other than sync_value. It does not draw them differently.
 
-Two panels, same pulses, different t=0:
+Both panels hold the same pulses with a different t=0:
 
-* anchored on each pulse's own rising-edge crossing — pulse shape and width consistency, with
-  every pulse's own timing error divided out;
-* anchored on the decoded PPM slot position (fitted frame start + word index * word_period +
-  decoded value) — the same traces against the grid the decoder actually placed them on, so the
-  horizontal spread *is* the timing error budget: sub-slot residual plus frame-start fit error.
+* The first panel anchors each pulse on its own rising edge. It shows the consistency of the pulse
+  shape and the pulse width, with the timing error of each pulse removed.
+* The second panel anchors each pulse on its decoded PPM slot. The horizontal spread is then the
+  timing error itself: the residual of each pulse plus the error in the fitted frame start.
 """
 
 import argparse
@@ -27,21 +27,19 @@ from coding_synchronization.encoder import FrameParams, ModulationParams
 from coding_synchronization.measurement.Cli import (
     add_extraction_args,
     add_modulation_args,
+    add_slot_calibration_arg,
     add_title_arg,
     add_verbose_arg,
     add_waveform_args,
+    extract_calibrated,
     extraction_params,
     figure_title,
     log_level,
-    min_separation_samples,
-    slot_time_s,
     split_replica,
     waveform_params,
 )
 from coding_synchronization.measurement.OffsetExtractor import (
-    auto_threshold,
     differential,
-    extract_offsets,
     rising_edge_crossing,
 )
 from coding_synchronization.measurement.Plotting import plot_sync_eye
@@ -56,15 +54,19 @@ def _parse_args() -> argparse.Namespace:
     add_waveform_args(parser)
     add_extraction_args(parser)
     add_modulation_args(parser)
+    add_slot_calibration_arg(parser)
     add_title_arg(parser)
     add_verbose_arg(parser)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--window-factor", type=float, default=6.0,
-        help="half-window shown around each pulse's rising edge, as a multiple of the median "
-             "detected pulse width",
+        help="How much of the signal to show on each side of the rising edge. The unit is the "
+             "median pulse width.",
     )
-    parser.add_argument("--no-show", action="store_true", help="save the figure without plt.show()")
+    parser.add_argument(
+        "--no-show", action="store_true",
+        help="Save the figure, and do not open a window.",
+    )
     return parser.parse_args()
 
 
@@ -76,10 +78,7 @@ def main() -> None:
     wf = load_waveform(wp)
     ex = extraction_params(args)
     diff = differential(wf, ex)
-    slot_s = slot_time_s(args, wf.dt_s)
-    ex.min_separation_samples = min_separation_samples(args, wf.dt_s, slot_s)
-    thr = ex.threshold if ex.threshold is not None else auto_threshold(diff.values)
-    offsets = extract_offsets(diff, wf.dt_s, ex, threshold=thr)
+    offsets, slot_s, thr = extract_calibrated(diff, wf, ex, args)
     if len(offsets) == 0:
         raise SystemExit("No pulses extracted — nothing to plot")
     slots = offsets.to_slots(slot_s)

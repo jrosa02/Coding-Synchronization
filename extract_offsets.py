@@ -1,14 +1,13 @@
-"""Strip pulse offsets out of a differential scope capture for a given threshold.
+"""Find the pulses in a capture at a given threshold, and save their positions.
 
-    python extract_offsets.py measurments/RefCurve_2026-08-18_0_124555.Wfm.csv \
-        --threshold 0.05
+    python extract_offsets.py measurments/RefCurve_2026-08-18_0_124555.Wfm.csv --threshold 0.05
 
-Loads the two-column CSV, removes each channel's own DC pedestal so both sit at zero, then combines
-the differential pair — added by default, because the measuring device already inverts one leg —
-thresholds the result, and takes the amplitude-weighted centroid of every above-threshold run.
-Writes `offsets.npz` (+ `.json` + `.csv`) in slot units — the hand-off to decode_measurement.py.
+The script removes the DC level of each channel, merges the two channels, and applies the
+threshold. It computes one position for every run above the threshold. It writes the positions in
+slots to offsets.npz, offsets.json and offsets.csv, which decode_measurement.py reads.
 
-Use --sweep LOW HIGH N first if you don't know a good threshold yet.
+The measuring device inverts one leg of the pair, so the default --combine add restores the pulse.
+Use --sweep LOW HIGH N first when you do not know a good threshold.
 """
 
 import argparse
@@ -22,10 +21,12 @@ from coding_synchronization._logging import setup_logging
 from coding_synchronization.measurement.Cli import (
     add_extraction_args,
     add_modulation_args,
+    add_slot_calibration_arg,
     add_title_arg,
     add_verbose_arg,
     add_waveform_args,
     apply_suptitle,
+    extract_calibrated,
     extraction_params,
     log_level,
     min_separation_samples,
@@ -35,7 +36,6 @@ from coding_synchronization.measurement.Cli import (
     waveform_params,
 )
 from coding_synchronization.measurement.OffsetExtractor import (
-    auto_threshold,
     differential,
     extract_offsets,
     params_to_dict,
@@ -52,14 +52,16 @@ def _parse_args() -> argparse.Namespace:
     add_waveform_args(parser)
     add_extraction_args(parser)
     add_modulation_args(parser)
+    add_slot_calibration_arg(parser)
     add_title_arg(parser)
     add_verbose_arg(parser)
-    parser.add_argument("--out", type=str, default=None, help="output .npz path")
+    parser.add_argument("--out", type=str, default=None, help="The path of the output .npz file.")
     parser.add_argument(
         "--sweep", nargs=3, type=float, metavar=("LOW", "HIGH", "N"), default=None,
-        help="try N thresholds between LOW and HIGH and print a table instead of saving",
+        help="Try N thresholds between LOW and HIGH. The script prints a table and saves "
+             "nothing.",
     )
-    parser.add_argument("--no-plot", action="store_true", help="skip the diagnostic figure")
+    parser.add_argument("--no-plot", action="store_true", help="Do not draw the diagnostic figure.")
     return parser.parse_args()
 
 
@@ -87,8 +89,7 @@ def main() -> None:
             print(f"{thr:>14.6g} {len(off):>10d} {frames:>8d} {float(np.median(gaps)):>12.2f}")
         return
 
-    thr = ex.threshold if ex.threshold is not None else auto_threshold(diff.values)
-    offsets = extract_offsets(diff, wf.dt_s, ex, threshold=thr)
+    offsets, slot_s, thr = extract_calibrated(diff, wf, ex, args)
     slots = offsets.to_slots(slot_s)
 
     out_dir = output_dir()

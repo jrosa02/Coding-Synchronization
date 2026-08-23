@@ -1,21 +1,23 @@
-"""Visualize the raw sync-section offsets Syncer receives, with an OLS fit + uncertainty.
+"""Fit a line through the sync residuals, and show how far the residuals drift.
 
     python plot_sync_regression.py measurments/RefCurve_....csv --eof-num 2 --threshold 0.3 ...
     python plot_sync_regression.py ... --all-frames
 
-Plots each frame's raw, chunk-zeroed sync-pulse offsets (slot units) — not decoded PPM values —
-against their word index, calibrated the same way `Syncer._sync_frame`'s Pass 1 is (median gap /
-word_period, mean-zeroed frame_start), so the residual hovers around zero rather than reproducing
-the raw scale mismatch as a diagonal trend. This is exactly what Pass-1 calibration does
-internally; the fitted x=0 intercept is marked with its own uncertainty to make clear it isn't
-pinned to exactly 0, just expected to hover near it.
+The script plots the raw sync pulse offsets in slots against their word index. It calibrates them
+the way pass 1 of Syncer._sync_frame does, so the residual stays near zero instead of showing the
+raw scale mismatch as a slope. The fit marks its own intercept at x=0 with an uncertainty, because
+the intercept is expected to lie near zero and is not forced to zero.
 
-By default plots one frame's sync section (8 points); --all-frames pools every frame's sync
-section into the same regression (one x/y pair per word index per frame), so the fit reveals any
-bias tied to word position that's consistent *across* frames, not just within one.
+By default the script uses the sync section of one frame. --all-frames fits one line through the
+sync sections of every frame, which reveals a bias that repeats across frames.
 
-Deliberately does not run Model2/Syncer — it only needs the raw extracted offsets and the same
-chunking Splitter/FrameFilter do, replicated directly here.
+The script does not run Model2 or the Syncer. It repeats the same chunking that the Splitter and
+the FrameFilter perform, so it needs the extracted offsets only.
+
+A tilted fit means the slot time scale is wrong. It does not mean the sync words decode wrongly.
+sync_value cancels in this calculation, because frame_start subtracts it and the decode adds it
+back, so the residual is the same for every --sync-value. --calibration median reproduces the tilt
+of the earlier median-only scale. The default value ls matches the Syncer.
 """
 
 import argparse
@@ -30,22 +32,18 @@ from coding_synchronization._logging import setup_logging
 from coding_synchronization.measurement.Cli import (
     add_extraction_args,
     add_modulation_args,
+    add_slot_calibration_arg,
     add_title_arg,
     add_verbose_arg,
     add_waveform_args,
+    extract_calibrated,
     extraction_params,
     figure_title,
     log_level,
-    min_separation_samples,
     output_dir,
-    slot_time_s,
     waveform_params,
 )
-from coding_synchronization.measurement.OffsetExtractor import (
-    auto_threshold,
-    differential,
-    extract_offsets,
-)
+from coding_synchronization.measurement.OffsetExtractor import differential
 from coding_synchronization.measurement.Plotting import plot_offset_regression
 from coding_synchronization.measurement.WaveformLoader import load_waveform
 
@@ -57,29 +55,47 @@ def _parse_args() -> argparse.Namespace:
     add_waveform_args(parser)
     add_extraction_args(parser)
     add_modulation_args(parser)
+    add_slot_calibration_arg(parser)
     add_title_arg(parser)
     add_verbose_arg(parser)
     parser.add_argument(
         "--frame-index", type=int, default=None,
-        help="which chunk to inspect (0-based, after --keep-first-frame filtering); default: "
-             "first with the exact expected pulse count, falling back to the first available "
-             "chunk if none match. Ignored with --all-frames.",
+        help="Which chunk to inspect, counted from 0 after --keep-first-frame. The default is "
+             "the first chunk with the expected pulse count. If no chunk matches, the script "
+             "uses chunk 0. --all-frames ignores this option.",
     )
     parser.add_argument(
         "--all-frames", action="store_true",
-        help="pool every frame's sync section into one regression, instead of just one frame",
+        help="Fit one line through the sync sections of every frame, and not through one frame."
     )
-    parser.add_argument("--no-show", action="store_true", help="save the figure without plt.show()")
+    parser.add_argument(
+        "--calibration", choices=("ls", "median"), default="ls",
+        help="How to fit the slot time scale of the sync section. This matches pass 1 of the "
+             "Syncer. ls is the default, and it refines the median gap with a least-squares fit "
+             "over the sync pulses. median uses the median gap alone, which tilts the "
+             "residual.",
+    )
+    parser.add_argument(
+        "--no-show", action="store_true",
+        help="Save the figure, and do not open a window.",
+    )
     return parser.parse_args()
 
 
 def _frame_residual(
-    chunk: np.ndarray, sync_num: int, word_period: int, sync_value: int
+    chunk: np.ndarray, sync_num: int, word_period: int, sync_value: int,
+    calibration: str = "ls",
 ) -> tuple[np.ndarray, np.ndarray, float, float, np.ndarray, np.ndarray]:
     """Calibrate one chunk's sync section the same way Syncer's Pass 1 does.
 
     Returns (x, y_raw, scale, frame_start, decoded, residual). `residual` reproduces
     `Syncer.sync_residuals` for this chunk, computed independently of Model2/Syncer.
+
+    `calibration="median"` is the old median-gap-only scale, kept so the bias it introduces can be
+    rendered side by side with the fixed one: the median of a handful of noisy gaps is not the
+    least-squares slope, and the difference tilts the whole residual. Every pulse in the sync
+    section here is a real detection (unlike Syncer, which may have to assume a missing one), so
+    the refinement is a plain fit over all `sync_num` points.
     """
     y_raw = chunk[:sync_num]
     x = np.arange(sync_num, dtype=np.float64)
@@ -87,6 +103,10 @@ def _frame_residual(
     scale = float(np.median(head_gaps)) / word_period if len(head_gaps) > 0 else 1.0
     if not np.isfinite(scale) or scale <= 0.0:
         scale = 1.0
+    if calibration == "ls" and sync_num >= 3:
+        refined = float(np.polyfit(x, y_raw, 1)[0]) / word_period
+        if np.isfinite(refined) and refined > 0.0 and abs(refined / scale - 1.0) <= 0.01:
+            scale = refined
     pos = y_raw / scale
     frame_start = float(np.mean(pos - x * word_period)) - sync_value
     decoded = frame_start + x * word_period + sync_value
@@ -110,10 +130,7 @@ def main() -> None:
     wf = load_waveform(wp)
     ex = extraction_params(args)
     diff = differential(wf, ex)
-    slot_s = slot_time_s(args, wf.dt_s)
-    ex.min_separation_samples = min_separation_samples(args, wf.dt_s, slot_s)
-    thr = ex.threshold if ex.threshold is not None else auto_threshold(diff.values)
-    offsets = extract_offsets(diff, wf.dt_s, ex, threshold=thr)
+    offsets, slot_s, _thr = extract_calibrated(diff, wf, ex, args)
     if len(offsets) == 0:
         raise SystemExit("No pulses extracted — nothing to plot")
     slots = offsets.to_slots(slot_s)
@@ -135,7 +152,7 @@ def main() -> None:
     out = output_dir()
     root = ET.Element(
         "sync_regression", source=wf.source.name, word_period=f"{word_period:.6f}",
-        sync_value=str(sync_value),
+        sync_value=str(sync_value), calibration=args.calibration,
     )
 
     if args.all_frames:
@@ -145,7 +162,7 @@ def main() -> None:
         xs, ys, metrics = [], [], []
         for chunk_idx, chunk in candidates:
             x, y_raw, scale, frame_start, decoded, residual = _frame_residual(
-                chunk, args.sync_num, word_period, sync_value
+                chunk, args.sync_num, word_period, sync_value, args.calibration
             )
             xs.append(x)
             ys.append(residual)
@@ -192,7 +209,7 @@ def main() -> None:
                 f"Chunk {idx} has only {len(chunk)} pulses, fewer than sync_num={args.sync_num}"
             )
         x, y_raw, scale, frame_start, decoded, y = _frame_residual(
-            chunk, args.sync_num, word_period, sync_value
+            chunk, args.sync_num, word_period, sync_value, args.calibration
         )
         metric = _gap_jitter_metric(y_raw, word_period, args.ppm_rank)
         if metric is not None:
@@ -211,7 +228,8 @@ def main() -> None:
 
     fig, ax = plt.subplots(figsize=(11, 6.5))
     plot_offset_regression(
-        ax, x, y, title=figure_title(args, title), ylabel="Actual − decoded (slots)"
+        ax, x, y, title=figure_title(args, title), ylabel="Actual − decoded (slots)",
+        frame_words=expected_total,
     )
 
     fig.tight_layout()

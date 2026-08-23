@@ -1,17 +1,18 @@
-"""Diagnose one whole frame's pulse detection against the raw waveform.
+"""Compare the detected pulses of one frame against the raw waveform.
 
     python plot_frame_detail.py measurments/RefCurve_....csv --eof-num 2 --threshold 0.3 ...
-    python plot_frame_detail.py ... --sections sync metadata     # just the frame head
+    python plot_frame_detail.py ... --sections sync metadata     # the head of the frame only
 
-Clips the raw combined-differential trace around one frame — by default the whole frame,
-sync+metadata+data+ecc — and overlays (a) the pulses OffsetExtractor actually detected and (b) a
-synthetic "ideal PPM" pulse train at every word slot's expected position (ground truth for sync
-words, the value Syncer already decoded for every other word) — a real bump with no ideal marker,
-or vice versa, means detection missed something.
+The script cuts the raw signal around one frame and draws two sets of marks on it. The first set
+holds the pulses that OffsetExtractor detected. The second set holds an ideal PPM pulse at the
+expected position of every word. A real pulse without an ideal mark means the detection missed
+something. An ideal mark without a real pulse means the decode placed a word wrongly.
 
---sections narrows the window to a span of sections (they are contiguous, so a set is shown as
-the range from the earliest to the latest), which is what makes individual pulses resolvable
-again: a full frame is millions of samples wide and a pulse is 1-3 samples.
+The ideal value of a sync word is known. For every other word the script uses the value that the
+Syncer decoded.
+
+--sections narrows the window to a range of sections. Use it to see individual pulses, because a
+whole frame is millions of samples wide and one pulse is a few samples wide.
 """
 
 import argparse
@@ -26,22 +27,18 @@ from coding_synchronization.encoder import FrameParams, ModulationParams
 from coding_synchronization.measurement.Cli import (
     add_extraction_args,
     add_modulation_args,
+    add_slot_calibration_arg,
     add_title_arg,
     add_verbose_arg,
     add_waveform_args,
+    extract_calibrated,
     extraction_params,
     figure_title,
     log_level,
-    min_separation_samples,
-    slot_time_s,
     split_replica,
     waveform_params,
 )
-from coding_synchronization.measurement.OffsetExtractor import (
-    auto_threshold,
-    differential,
-    extract_offsets,
-)
+from coding_synchronization.measurement.OffsetExtractor import differential
 from coding_synchronization.measurement.Plotting import frame_sections, plot_frame_detail
 from coding_synchronization.measurement.WaveformLoader import load_waveform
 from coding_synchronization.Model import Model2
@@ -59,29 +56,34 @@ def _parse_args() -> argparse.Namespace:
     add_waveform_args(parser)
     add_extraction_args(parser)
     add_modulation_args(parser)
+    add_slot_calibration_arg(parser)
     add_title_arg(parser)
     add_verbose_arg(parser)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--frame-index", type=int, default=None,
-        help="which synced frame to inspect (0-based); default: first with the exact expected "
-             "pulse count, falling back to frame 0 if none match",
+        help="Which frame to inspect, counted from 0. The default is the first frame with the "
+             "expected pulse count. If no frame matches, the script uses frame 0.",
     )
     parser.add_argument(
         "--sections", nargs="+", choices=_SECTIONS, default=None,
-        help="which frame sections to show; default: the whole frame. Sections are contiguous, "
-             "so several are shown as one window spanning the earliest to the latest",
+        help="Which frame sections to show. The default is the whole frame. The sections "
+             "follow each other, so the window reaches from the earliest section to the "
+             "latest.",
     )
     parser.add_argument(
         "--margin-words", type=float, default=1.0,
-        help="extra word_periods of context shown before/after the plotted window",
+        help="How many extra word periods to show on each side of the window."
     )
     parser.add_argument(
         "--trace-only", action="store_true",
-        help="plot only the measured trace — no section bands, detected-pulse ticks, ideal-PPM "
-             "overlay or slot ruler",
+        help="Plot the measured trace alone. The figure then holds no section bands, no pulse "
+             "marks, no ideal PPM overlay and no slot ruler.",
     )
-    parser.add_argument("--no-show", action="store_true", help="save the figure without plt.show()")
+    parser.add_argument(
+        "--no-show", action="store_true",
+        help="Save the figure, and do not open a window.",
+    )
     return parser.parse_args()
 
 
@@ -138,10 +140,7 @@ def main() -> None:
     wf = load_waveform(wp)
     ex = extraction_params(args)
     diff = differential(wf, ex)
-    slot_s = slot_time_s(args, wf.dt_s)
-    ex.min_separation_samples = min_separation_samples(args, wf.dt_s, slot_s)
-    thr = ex.threshold if ex.threshold is not None else auto_threshold(diff.values)
-    offsets = extract_offsets(diff, wf.dt_s, ex, threshold=thr)
+    offsets, slot_s, _thr = extract_calibrated(diff, wf, ex, args)
     if len(offsets) == 0:
         raise SystemExit("No pulses extracted — nothing to plot")
     slots = offsets.to_slots(slot_s)
