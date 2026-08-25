@@ -25,8 +25,9 @@ calibrates the slot time, decodes the frames, and measures the error rates with 
 parity. Use it to test the hardware against that prediction. See
 [`docs/measurement.md`](docs/measurement.md).
 
-Both parts build a pipeline from the same stages, and both use the same `Splitter`, `Syncer`,
-`EccDecode` and `MetadataCheck`. See [`docs/pipeline.md`](docs/pipeline.md).
+Both parts build a pipeline from the same stages, and both use the same `Splitter`,
+`SimpleSyncer`/`TwoPointSync`, `EccDecode` and `MetadataCheck`. See
+[`docs/pipeline.md`](docs/pipeline.md).
 
 ## Install
 
@@ -43,6 +44,50 @@ uv run main.py
 ```
 
 `main.py` holds every parameter. Edit the file to change a run.
+
+## Sync pulses vs. clock jitter
+
+```bash
+uv run s_scripts/simulate_wer_map_sync_jitter.py --no-show
+```
+
+`RandomShift` (`src/coding_synchronization/channel/RandomShift.py`) models clock jitter as one
+independent Gaussian draw per pulse:
+
+$$x' = x + n, \qquad n \sim \mathcal{N}(0, \sigma^{2})$$
+
+`SimpleSyncer` (`docs/math.md#7-synchronization`) fits a scale $\hat{s}$ through the sync pulses by
+least squares, and a residual scale error $\varepsilon$ in that fit drifts word $j$'s decoded
+value by $\varepsilon W j$ slots, $W$ the word period. A word survives while that drift stays
+under half a slot, so the last word of the frame is the first to fail:
+
+$$|\varepsilon| < \varepsilon_{\max} = \frac{1}{2 W (L-1)}$$
+
+with $L$ the frame length in words. `docs/math.md` leaves two bounds open at this point: the
+margin a given $\sigma$ and $N_{\mathrm{sync}}$ actually buy against that limit (section 6), and
+the probability that pass 1b of `SimpleSyncer` locates fewer than 3 sync pulses as a function of
+$\sigma$, the pulse loss rate and $N_{\mathrm{sync}}$ (section 7) — neither has a closed form.
+`s_scripts/simulate_wer_map_sync_jitter.py` answers both empirically instead of deriving them: it
+sweeps $N_{\mathrm{sync}}$ and $\sigma$ on a 2D grid, runs `Model1` with the ECC decoder disabled
+(`run_ecc=False`, since only the pre-ECC/sync question is asked and Reed-Solomon decode is the
+most expensive stage per frame), and plots the resulting pre-ECC word error rate as a map. Each
+grid cell is independent and runs in its own process.
+
+## Tracking Doppler drift: SimpleSyncer vs. TwoPointSync
+
+```bash
+uv run s_scripts/simulate_doppler_scale_tracking.py --no-show
+```
+
+`SimpleSyncer` fits one flat scale per frame, which absorbs a *constant* Doppler rate but leaves
+the curvature term $\varepsilon_{\mathrm{res}} \approx \ddot{\rho}T_f/(2c)$ open
+(`docs/math.md#7-synchronization`, "Tolerance to Doppler shift"). `TwoPointSync` adds a second
+step: it fits a line through the previous and current frame's own fitted points, and applies that
+line's slope as a piecewise-linear scale correction across the frame instead of one flat value
+(`docs/math.md#7-synchronization`, "Two-point tracking"). This script runs both variants on the
+same simulated pass — Doppler shift plus a per-frame `ConstantOffset` only, no jitter — and plots
+each one's fitted drift and residual against the analytic Doppler curve, so the curvature
+correction `TwoPointSync` adds is visible directly.
 
 ## Decode a capture
 

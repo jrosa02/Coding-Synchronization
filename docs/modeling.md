@@ -10,24 +10,49 @@ what each stage computes.
 
 ## Pipeline order
 
-`Model1.construct_pipeline` appends these stages:
+`Model1.construct_pipeline` appends these stages, in this exact order:
 
 1. `PassageGen` — generates the frames of one satellite pass.
-2. `RandomShift` — moves each pulse by a random amount.
-3. `DopplerShift` — stretches the time axis, as the range rate of the satellite does.
-4. `ConstantOffset` — adds one fixed offset to a whole frame.
-5. `Splitter` — cuts the pulse stream into chunks.
-6. `Syncer` — locates the sync section and decodes the words.
-7. `EccDecode` — corrects each frame with its Reed-Solomon parity.
-8. `MetadataCheck` — verifies the metadata counter, and removes those words.
-9. `Collector` — keeps the payload.
+2. `VanishPulses` — removes each pulse with a fixed probability.
+3. `RandomShift` — moves each pulse by a random amount.
+4. `DopplerShift` — stretches the time axis, as the range rate of the satellite does.
+5. `ConstantOffset` — adds one fixed offset to a whole frame.
+6. `AddedPulses` — inserts spurious pulses at random positions.
+7. `Splitter` — cuts the pulse stream into chunks.
+8. `SimpleSyncer` (or `TwoPointSync`, via `Model1`'s `syncer_cls` argument) — locates the sync
+   section and decodes the words.
+9. `Collector("synced")` — keeps the words as `Syncer` decoded them, before ECC touches them.
+10. `EccDecode` — corrects each frame with its Reed-Solomon parity. Present only when
+    `frame_params.ecc_num > 0` and `run_ecc=True`; `Model1(run_ecc=False)` keeps the stage out
+    of the run entirely, which is what the `s_scripts/` sweeps use to skip the most expensive
+    stage per frame when the question they ask does not need it.
+11. `Collector("corrected")` — keeps the words after ECC correction. Present only when step 10 is.
+12. `MetadataCheck` — verifies the metadata counter, and removes those words. Runs after ECC, so
+    it always tests corrected words.
+13. `Collector("payload")` — keeps the final decoded payload.
 
-`Model1` appends each impairment only when its `ChannelParams` field holds a value. A field of
-`None` therefore removes that stage from the run. The `Channel` compound stage applies the same
-rule. [`docs/math.md`](math.md#3-channel) gives the model of each impairment.
+`Model1` appends each channel impairment (steps 2–6) only when its `ChannelParams` field holds a
+value. A field of `None` therefore removes that stage from the run. The `Channel` compound stage
+applies the same rule. [`docs/math.md`](math.md#3-channel) gives the model of each impairment.
 
-[`docs/pipeline.md`](pipeline.md) describes the stages from step 5 onward. The measurement part
-uses the same five.
+[`docs/pipeline.md`](pipeline.md) describes the stages from step 7 onward. The measurement part
+uses the same five, plus `FrameFilter` and up to two more `Collector` taps of its own.
+
+```mermaid
+flowchart TD
+    A[PassageGen] --> B["VanishPulses\n(optional: vanish_rate)"]
+    B --> C["RandomShift\n(optional: sigma)"]
+    C --> D["DopplerShift\n(optional: doppler)"]
+    D --> E["ConstantOffset\n(optional: max_const_offset)"]
+    E --> F["AddedPulses\n(optional: added_rate)"]
+    F --> G[Splitter]
+    G --> H["SimpleSyncer / TwoPointSync\n(syncer_cls)"]
+    H --> I["Collector('synced')"]
+    I --> J["EccDecode\n(optional: ecc_num > 0 and run_ecc)"]
+    J --> K["Collector('corrected')\n(optional: same as EccDecode)"]
+    K --> L[MetadataCheck]
+    L --> M["Collector('payload')"]
+```
 
 ## Transmitter stages
 
@@ -86,3 +111,55 @@ exactly. Read that test before you change a decoder stage.
 A run ends with two reports. The ECC report gives the error rates of the frames. The metadata
 report gives the share of frames whose counter did not match. Together they answer the question of
 [`docs/why.md`](why.md): does this configuration survive this channel?
+
+## Sweep scripts
+
+`s_scripts/` answers a question `docs/math.md` states but leaves open, by running many `Model1`
+instances instead of deriving a closed form. Each script builds its own `Model1` per point of its
+sweep, so it does not reuse the pipeline description above directly — it repeats the pieces of it
+that the question needs.
+
+### `simulate_wer_map_sync_jitter.py`
+
+Answers [`docs/math.md`](math.md#7-synchronization)'s open bound on how many sync pulses a frame
+needs against a given clock jitter. It runs `Model1` with `run_ecc=False` and `doppler=False`, so
+the only impairment is `RandomShift`, and compares `Syncer`'s output directly against the words
+`FrameGen` actually sent — not against an `EccReport` — because ECC never runs.
+
+```mermaid
+flowchart TD
+    A["Parse args: sync_num values,\nsigma range/count, seeds, frames"] --> B["sigma grid: log-spaced\nnp.geomspace(sigma_min, sigma_max)"]
+    B --> C["_check_split_window per sync_num\n(warns if Splitter threshold unsafe)"]
+    C --> D["ProcessPoolExecutor:\none job per (sync_num, sigma) cell"]
+    D --> E["_run_grid_point:\nfor each seed in range(seeds)"]
+    E --> F["_run_seed:\nModel1(run_ecc=False, doppler=False,\nn_frames fixed, sigma=this cell's sigma)"]
+    F --> G["compare model._synced.frames\nagainst frames_sent"]
+    G --> H["_frame_errors:\nwer_pre, ber_pre, damaged_frames"]
+    H --> I["average over seeds -> one grid cell"]
+    I --> J["wer_grid[sync_num, sigma]"]
+    J --> K["pcolormesh heatmap\n(log-log axes)"]
+    J --> L["wer_map_sync_jitter.json"]
+```
+
+### `simulate_doppler_scale_tracking.py`
+
+Answers the second open bound of the same section: the curvature residual `TwoPointSync` leaves
+behind, compared against `SimpleSyncer`'s. The channel carries only `DopplerShift` and a per-frame
+`ConstantOffset` — no jitter, no pulse loss or addition — because those two impairments are the
+ones a scale fit can absorb for free, so anything left over is the curvature error under test.
+
+```mermaid
+flowchart TD
+    A["Parse args: altitude, elevation,\nsync_num, max_const_offset"] --> B["scratch PassageGen:\nlearn n_frames, frame_duration_slots, tca_slots"]
+    B --> C["ChannelParams:\nDopplerShift on + ConstantOffset only"]
+    C --> D["_run_variant(SimpleSyncer)"]
+    C --> E["_run_variant(TwoPointSync)"]
+    D --> F["Model1(run_ecc=False, syncer_cls=...)\n-> syncer.slot_scales"]
+    E --> G["Model1(run_ecc=False, syncer_cls=...)\n-> syncer.slot_scales, syncer.slopes"]
+    F --> H["recovered = slot_scales - 1"]
+    G --> H
+    H --> I["true_frac_error(t) = rho_dot(t) / C\n(analytic, docs/math.md #3)"]
+    I --> J["residual = true_frac_error - recovered\n(per-frame + dense-interpolated)"]
+    J --> K["plot: per-frame drift panel\n+ residual panel"]
+    J --> L["doppler_scale_tracking.json"]
+```

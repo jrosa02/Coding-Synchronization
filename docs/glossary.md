@@ -14,12 +14,12 @@ old text onto the term of this documentation.
 | dead slots | Slots added after the PPM range of a word. They give the transmitter time to recover. | `dead_slots` |
 | offset | The position of one detected pulse. Offsets are in samples after extraction and in slots after conversion. | pulse position, centroid |
 | frame | One full transmission unit: the sync words, the metadata words, the data words and the ECC words. | — |
-| chunk | A group of pulses that the `Splitter` cut out of the capture. A chunk becomes a frame only after the `Syncer` accepts it. | frame (in `Splitter` and `Model2` logs) |
+| chunk | A group of pulses that the `Splitter` cut out of the capture. A chunk becomes a frame only after the sync stage accepts it. | frame (in `Splitter` and `Model2` logs) |
 | sync section | The first `sync_num` words of a frame. Every sync word carries the same value. | sync words, sync head |
 | sync value | The PPM value that every sync word carries. `--sync-value` sets it. | `sync_value` |
 | frame start | The fitted position of word 0 in a frame, in slots. It can be negative. | `frame_start` |
 | residual | The distance between where a pulse arrived and where the decode grid puts it, in slots. | sync residual, timing error |
-| scale | The correction factor that the `Syncer` applies to the given slot time. | `slot_scale`, calibration |
+| scale | The correction factor that the sync stage applies to the given slot time. | `slot_scale`, calibration |
 | EOF gap | The dead time between two frames. `eof_num` gives its length in words. | `eof_num`, guard interval |
 | codeword | One frame without its sync words. The metadata and data words carry the information. The ECC words carry the parity. | RS block |
 | word error rate (WER) | The share of words that arrived wrong. | symbol error rate |
@@ -31,7 +31,7 @@ old text onto the term of this documentation.
 
 **Chunk against frame.** The `Splitter` cuts the pulse stream at every gap larger than its
 threshold. Each cut gives one chunk. A chunk holds the right number of pulses only if the split was
-correct. The `Syncer` then locates the sync section and turns the chunk into a frame. A log line
+correct. The sync stage then locates the sync section and turns the chunk into a frame. A log line
 that reports 192 frames of 3 pulses reports chunks, not frames.
 
 **Slot time against samples per slot.** The slot time is a property of the transmitter. The number

@@ -21,7 +21,8 @@ from coding_synchronization.channel import (
 from coding_synchronization.decoder.Ecc import EccDecode, EccParams, EccReport
 from coding_synchronization.decoder.Metadata import MetadataCheck
 from coding_synchronization.decoder.Splitter import Splitter
-from coding_synchronization.decoder.Syncer import Syncer
+from coding_synchronization.decoder.SimpleSyncer import SimpleSyncer
+from coding_synchronization.decoder.TwoPointSync import TwoPointSync
 from coding_synchronization.encoder import (
     FrameParams,
     ModulationParams,
@@ -90,6 +91,29 @@ class ModelABC(abc.ABC):
             stage.frames_checked, stage.mismatches, stage.mismatch_rate,
         )
 
+    @staticmethod
+    def _build_syncer(
+        syncer_cls: type[SimpleSyncer],
+        mod_params: ModulationParams,
+        frame_params: FrameParams,
+        sync_value: int | None = None,
+    ) -> SimpleSyncer:
+        """Construct `syncer_cls`, passing `frame_duration_slots` only if it needs one.
+
+        `TwoPointSync` needs the nominal number of slots between frame starts to bridge
+        `frame_start` across Splitter's per-chunk zeroing (see TwoPointSync.py); `SimpleSyncer`
+        does not accept that parameter at all.
+        """
+        kwargs: dict = {} if sync_value is None else {"sync_value": sync_value}
+        if issubclass(syncer_cls, TwoPointSync):
+            word_period = (1 << mod_params.ppm_rank) + mod_params.dead_slots
+            frame_len = (
+                frame_params.sync_num + frame_params.metadata_num
+                + frame_params.data_num + frame_params.ecc_num
+            )
+            kwargs["frame_duration_slots"] = (frame_len + frame_params.eof_num) * word_period
+        return syncer_cls(mod_params, frame_params.sync_num, **kwargs)
+
 
 class Model1(ModelABC):
     def __init__(
@@ -102,6 +126,8 @@ class Model1(ModelABC):
         plot: bool = False,
         seed: int = 42,
         split_eof_num: int | None = None,
+        run_ecc: bool = True,
+        syncer_cls: type[SimpleSyncer] = SimpleSyncer,
     ) -> None:
         super().__init__(seed=seed)
         self.data = data
@@ -110,6 +136,12 @@ class Model1(ModelABC):
         self.overflight_params = overflight_params
         self.channel_params = channel_params
         self.plot = plot
+        self.syncer_cls = syncer_cls
+        # False skips the EccDecode stage even when frame_params.ecc_num > 0. FrameGen still
+        # writes real parity, so the frame's duration is unchanged; only the decode cost and the
+        # ecc_report/self._corrected outputs are skipped. For sweeps that only care about
+        # pre-ECC/sync-timing behaviour, this removes the most expensive stage per frame.
+        self.run_ecc = run_ecc
         # The Splitter threshold, in EOF words. None means "use frame_params.eof_num", which is
         # the transmitted gap width. The receiver does not need that number: the threshold only
         # has to sit between the largest gap inside a frame (word_period + max_value) and the
@@ -120,6 +152,7 @@ class Model1(ModelABC):
         self._collector: Collector | None = None
         self._synced: Collector | None = None
         self._corrected: Collector | None = None
+        self._syncer: SimpleSyncer | None = None
         self._ecc: EccDecode | None = None
         self._metadata: MetadataCheck | None = None
         self.ecc_report: EccReport | None = None
@@ -202,13 +235,14 @@ class Model1(ModelABC):
         threshold = eof_for_split * word_period
         self.runner.append(Splitter(threshold))
         maybe_plot(6)
-        self.runner.append(Syncer(self.mod_params, self.frame_params.sync_num))
+        self._syncer = self._build_syncer(self.syncer_cls, self.mod_params, self.frame_params)
+        self.runner.append(self._syncer)
         maybe_plot(7)
         # The words as received, before the ECC corrects them.
         self._synced = Collector("synced")
         self.runner.append(self._synced)
         fp = self.frame_params
-        if fp.ecc_num > 0:
+        if fp.ecc_num > 0 and self.run_ecc:
             # FrameGen writes real parity, so the ECC can always run here. It runs first, so the
             # metadata check below tests corrected words.
             self._ecc = EccDecode(
@@ -306,8 +340,10 @@ class Model2(ModelABC):
         ecc_params: EccParams | None = None,
         verify_metadata: bool = False,
         strict_metadata: bool = False,
+        syncer_cls: type[SimpleSyncer] = SimpleSyncer,
     ) -> None:
         super().__init__(seed=seed)
+        self.syncer_cls = syncer_cls
         self.offsets = np.asarray(offsets, dtype=np.float64)
         # When set, an EccDecode stage corrects every frame before the metadata check reads it,
         # and the result is kept here.
@@ -328,7 +364,7 @@ class Model2(ModelABC):
         self._synced: Collector | None = None
         self._corrected: Collector | None = None
         self._split: Collector | None = None
-        self._syncer: Syncer | None = None
+        self._syncer: SimpleSyncer | None = None
         self._ecc: EccDecode | None = None
         self._metadata: MetadataCheck | None = None
         self.output_dir: Path | None = None
@@ -365,8 +401,8 @@ class Model2(ModelABC):
             drop_wrong_length=self.drop_wrong_length,
         ))
         maybe_plot(2)
-        self._syncer = Syncer(
-            self.mod_params, self.frame_params.sync_num, sync_value=self.sync_value
+        self._syncer = self._build_syncer(
+            self.syncer_cls, self.mod_params, self.frame_params, sync_value=self.sync_value
         )
         self.runner.append(self._syncer)
         # tap before MetadataCheck strips the metadata words, so every decoded PPM value is kept

@@ -8,7 +8,7 @@ stage computes.
 The decode path runs in this order in both models:
 
 ```
-Splitter -> [FrameFilter] -> Syncer -> Collector("synced") -> EccDecode
+Splitter -> [FrameFilter] -> SimpleSyncer|TwoPointSync -> Collector("synced") -> EccDecode
     -> Collector("corrected") -> MetadataCheck -> Collector("payload")
 ```
 
@@ -52,10 +52,10 @@ A wrong slot time changes the threshold in samples. The `Splitter` then cuts ins
 every later stage reads chunks that are not frames. `docs/measurement.md` describes the guard
 against this.
 
-### Syncer
+### SimpleSyncer and TwoPointSync
 
-`Syncer` locates the sync section, calibrates the slot time, and decodes every word. It works in
-two passes.
+`SimpleSyncer` locates the sync section, calibrates the slot time, and decodes every word. It
+works in two passes.
 
 Pass 1 calibrates the scale:
 
@@ -64,7 +64,7 @@ Pass 1 calibrates the scale:
 2. `_locate_sync` finds each sync pulse within `margin` slots of its expected position. The margin
    is one eighth of the word period.
 3. `_refine_scale` fits a least-squares line through the located pulses against their word indices.
-   The slope gives the final scale. The `Syncer` keeps the coarse scale in two cases: fewer
+   The slope gives the final scale. `SimpleSyncer` keeps the coarse scale in two cases: fewer
    than three pulses were located, or the new scale differs from the coarse one by more than one
    percent.
 
@@ -74,14 +74,21 @@ few parts per million therefore becomes a fraction of a slot at the last word.
 
 Pass 2 decodes the words. `_decode_positions` divides each position by the word period. The integer
 part gives the word index and the remainder gives the PPM value. A pulse that lands in the dead
-zone is ambiguous, so the `Syncer` splits the difference at the middle of the dead zone.
+zone is ambiguous, so `SimpleSyncer` splits the difference at the middle of the dead zone.
 
-The `Syncer` also keeps these diagnostics for each frame:
+`SimpleSyncer` also keeps these diagnostics for each frame:
 
 - the decoded sync words and the number of sync pulses located,
 - the frame start and the scale,
 - the residual of each sync pulse,
 - the deviation of each sync gap from the word period.
+
+`TwoPointSync` subclasses `SimpleSyncer` and reuses pass 1 and pass 2 unchanged for acquiring
+`frame_start` and each frame's own scale. It then fits a line through the previous and current
+frame's own fitted points, and applies that line's slope as a piecewise-linear scale correction
+across the current frame, instead of `SimpleSyncer`'s single flat scale. `docs/math.md` section 7
+("Two-point tracking") derives this, and `Model1`/`Model2` select which class to use via their
+`syncer_cls` constructor argument (default `SimpleSyncer`).
 
 ### EccDecode
 
@@ -119,9 +126,9 @@ Without `strict` a mismatch increments `mismatches` and writes a warning. With `
 
 `Collector` keeps every frame it sees. It works as a sink at the end of a pipeline. It also works
 as a tap in the middle, because `process` passes the frames through unchanged. `Model2` uses
-up to four collectors: one after the `Splitter`, one after the `Syncer`, one after `EccDecode`, and
-one at the end. The tap after the `Syncer` holds the words as received, so the diagnostic plots
-still see what arrived and not what the ECC repaired.
+up to four collectors: one after the `Splitter`, one after the sync stage, one after `EccDecode`,
+and one at the end. The tap after the sync stage holds the words as received, so the diagnostic
+plots still see what arrived and not what the ECC repaired.
 
 ### PlotStage
 

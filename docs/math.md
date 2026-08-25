@@ -162,7 +162,7 @@ given pulse loss rate need is not yet derived.
 
 ## 7. Synchronization
 
-`src/coding_synchronization/decoder/Syncer.py`
+`src/coding_synchronization/decoder/SimpleSyncer.py`
 
 Pass 1a takes a coarse scale from the sync section, because the median survives one missing pulse:
 
@@ -230,6 +230,80 @@ from it, are not yet derived here.
 **Bound (open).** The probability that pass 1b locates fewer than 3 sync pulses, as a function of
 $\sigma$, the pulse loss rate and $N_{\mathrm{sync}}$. That probability is the acquisition failure
 rate of a frame.
+
+### Two-point tracking
+
+`src/coding_synchronization/decoder/TwoPointSync.py`
+
+`SimpleSyncer` fits $\hat{s}$ from frame $i$'s own sync pulses only, which is exactly why it can
+absorb only a constant rate and not $\ddot{\rho}$ (see the bound above). `TwoPointSync` keeps that
+same fit for $\hat{f}_i$ and $\hat{s}_i$ — sync-pulse acquisition (pass 1a/1b) is unchanged — and
+adds a second step that uses the previous frame's fitted point as well.
+
+Let $t_i = \hat{f}_i + i\,T_{\mathrm{fr}}$, the frame's fitted start placed on one continuous
+timeline: $\hat{f}_i$ is local to frame $i$'s own chunk (the Splitter zeroes each chunk), so the
+nominal frame duration $T_{\mathrm{fr}}$ (in slots, $=(L + N_{\mathrm{eof}})W$) is added back to
+bridge frame $i-1$ to frame $i$. The line through $(t_{i-1}, \hat{s}_{i-1})$ and
+$(t_{i}, \hat{s}_{i})$ gives a two-point estimate of how the scale itself is changing:
+
+$$\hat{s}'_{i} = \frac{\hat{s}_{i} - \hat{s}_{i-1}}{t_{i} - t_{i-1}}$$
+
+This is the two-frame secant approximation of $\dot{\hat{s}} \approx \ddot{\rho}/c$ — the same
+quantity the open bound above needs, recovered empirically instead of assumed. `TwoPointSync`
+then applies it as a piecewise-linear scale across frame $i$, rather than the flat $\hat{s}_i$
+`SimpleSyncer` uses everywhere in the frame:
+
+$$\hat{s}_{i}(p) = \hat{s}_{i} + \hat{s}'_{i}\,(p - \hat{f}_i)$$
+
+evaluated per pulse position $p$ before pass 2 decodes it. A flat fit only matches the Doppler
+profile's *value* at one point per frame; a piecewise-linear one also matches its local *slope*,
+so the residual that survives is one derivative order higher — the change of $\ddot{\rho}$ across
+a frame, rather than $\ddot{\rho}$ itself. The first frame of a run, and any frame right after a
+failed sync, has no previous point to draw a line through; `TwoPointSync` falls back to
+`SimpleSyncer`'s flat $\hat{s}_i$ ($\hat{s}'_i = 0$) for that one frame.
+
+**Bound (open).** The residual order `TwoPointSync` leaves behind, in the same closed form as
+$\varepsilon_{\mathrm{res}}$ above, is not yet derived here — `s_scripts/simulate_doppler_scale_tracking.py`
+measures it empirically instead, alongside `SimpleSyncer`'s for comparison.
+
+### Frame-wide uncertainty propagation
+
+`src/coding_synchronization/measurement/SyncMargin.py`
+
+`Syncer` fits $\hat{f}$ and $\hat{s}$ from a frame's sync section alone, then reuses that one fit,
+unmodified, to place every other word of the frame — the fit's own uncertainty therefore does not
+stay inside the sync section. It grows with distance from the sync words the fit was built on. An
+ordinary least-squares fit of residual $y$ against word index $x$, over the $n = N_{\mathrm{sync}}$
+sync points, gives the pooled residual variance and the fitted slope and intercept:
+
+$$s^{2} = \frac{1}{n-2}\sum_{i}\bigl(y_{i} - (\hat{a} + \hat{b}x_{i})\bigr)^{2}, \qquad
+\hat{b} = \frac{\sum_{i}(x_i - \bar{x})(y_i - \bar{y})}{S_{xx}}, \qquad
+S_{xx} = \sum_{i}(x_i - \bar{x})^{2}$$
+
+The standard OLS prediction-interval variance at word index $k$, extrapolated beyond the sync
+section the fit came from:
+
+$$\sigma^{2}_{\mathrm{pred}}(k) = s^{2}\left(1 + \frac{1}{n} + \frac{(k-\bar{x})^{2}}{S_{xx}}\right)$$
+
+Converting that predicted spread into a per-word decode-error probability, assuming Gaussian
+jitter and a decode boundary at half a slot ($v_{b} = 0.5$):
+
+$$P\bigl(|\text{error}| > v_{b}\bigr) = \mathrm{erfc}\!\left(\frac{v_{b}}{\sigma_{\mathrm{pred}}(k)\sqrt{2}}\right)$$
+
+`plot_sync_margin.py` draws $\sigma_{\mathrm{pred}}(k)$ directly, `plot_decode_risk.py` draws the
+exceedance probability above, and `plot_margin_validation.py` checks the prediction against the
+real per-word residuals `Syncer._decode_positions` produces for every decoded frame — the model
+above assumes any leftover miscalibration is a single linear term across the whole frame, and does
+not capture a non-linear (e.g. curvature-shaped) clock drift such as the one in "Tolerance to
+Doppler shift" above.
+
+Each frame fits this model from its own sync section only: pooling residuals across frames before
+fitting would shrink $\sigma_{\mathrm{pred}}$ as more frames are added, which is backwards, because
+frame-to-frame slot-time disagreement does not average away.
+
+**Bound (open).** How closely $\sigma_{\mathrm{pred}}(k)$ tracks the real residual scatter — the
+question `plot_margin_validation.py` puts to data rather than derives — is not yet stated here as a
+closed-form accuracy bound.
 
 ## 8. Error correction
 

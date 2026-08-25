@@ -68,6 +68,18 @@ Use `--no-auto-slot` to keep the given value. The results then depend on `--samp
 | `plot_frame_detail.py` | Does a detected pulse exist for every word of one frame? | `frame_detail.png` |
 | `plot_sync_eye.py` | How consistent are the pulse shape and the pulse timing? | `sync_eye.png` |
 | `plot_sync_regression.py` | Does the sync section show a timing error that grows across the frame? | `sync_regression.png`, `sync_regression.xml` |
+| `plot_sync_margin.py` | Extrapolated across the whole frame, how wide does the sync fit's own uncertainty become? | `sync_margin.png` |
+| `plot_decode_risk.py` | Converted to a probability, how likely is each word to decode wrong, given that extrapolated uncertainty? | `decode_risk.png` |
+| `plot_margin_validation.py` | Does that extrapolated uncertainty actually match the real scatter of decoded words? | `margin_validation.png` |
+
+The last three share one fit implementation, `measurement/SyncMargin.py`, and one question: whether
+the sync section's own calibration uncertainty, extrapolated by the standard OLS prediction
+interval, correctly predicts the decode risk of words the fit never saw directly (the metadata,
+data and ECC words). None of the three run `Model2` or `Syncer` — `plot_sync_margin.py` and
+`plot_decode_risk.py` repeat the same sync-section chunking and least-squares fit independently, so
+they exercise nothing but the extrapolation. `plot_margin_validation.py` is the odd one: it does run
+the real pipeline, and checks the other two scripts' assumption against the residuals `Syncer`
+actually produced. [`docs/math.md`](math.md#frame-wide-uncertainty-propagation) gives the equations.
 
 Every script shares the waveform, extraction and modulation options. `Cli.py` defines them, so a
 command that works for one script works for the others.

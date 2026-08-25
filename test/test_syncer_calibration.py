@@ -1,6 +1,6 @@
 """Pass-1 slot-time calibration: unbiased, and still robust to a missing sync pulse.
 
-Syncer calibrates the slot time from the sync section alone. The median sync-to-sync gap survives
+SimpleSyncer calibrates the slot time from the sync section alone. The median sync-to-sync gap survives
 a dropped pulse, but it is not the least-squares slope, and the difference is a residual tilt that
 accumulates over the frame — parts per million of scale error become a fraction of a slot by the
 last word, which is what pushed real captures past the +-0.5-slot decision boundary. These tests
@@ -10,7 +10,7 @@ the scale.
 
 import numpy as np
 
-from coding_synchronization.decoder.Syncer import Syncer
+from coding_synchronization.decoder.SimpleSyncer import SimpleSyncer
 from coding_synchronization.encoder import ModulationParams
 
 PPM_RANK = 10
@@ -19,11 +19,11 @@ WORD_PERIOD = (1 << PPM_RANK) + DEAD_SLOTS
 SYNC_NUM = 8
 
 
-def _syncer(sync_value: int = 0) -> Syncer:
+def _syncer(sync_value: int = 0) -> SimpleSyncer:
     mod_params = ModulationParams(
         ppm_rank=PPM_RANK, slot_time=np.float64(1e-6), dead_slots=DEAD_SLOTS
     )
-    return Syncer(mod_params, sync_num=SYNC_NUM, sync_value=sync_value)
+    return SimpleSyncer(mod_params, sync_num=SYNC_NUM, sync_value=sync_value)
 
 
 def _sync_section(rng: np.random.Generator, sigma: float, sync_value: int = 0) -> np.ndarray:
@@ -32,7 +32,7 @@ def _sync_section(rng: np.random.Generator, sigma: float, sync_value: int = 0) -
     return k * WORD_PERIOD + sync_value + rng.normal(0.0, sigma, SYNC_NUM)
 
 
-def _residual_slope(syncer: Syncer, positions: np.ndarray) -> float:
+def _residual_slope(syncer: SimpleSyncer, positions: np.ndarray) -> float:
     """Slope of the sync residual against word index — the diagonal the regression plot draws."""
     syncer._sync_frame(positions)
     residual = syncer._last_sync_residual
@@ -53,7 +53,7 @@ def test_refined_scale_tilts_far_less_than_the_median_estimator():
 
     refined = np.array([_residual_slope(syncer, f) for f in frames])
 
-    # Same frames, median-gap scale only — replicated here rather than reached for in Syncer,
+    # Same frames, median-gap scale only — replicated here rather than reached for in SimpleSyncer,
     # which no longer offers it.
     x = np.arange(SYNC_NUM, dtype=np.float64)
     median_only = []

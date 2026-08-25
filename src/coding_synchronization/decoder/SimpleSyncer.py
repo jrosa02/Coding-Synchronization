@@ -8,7 +8,7 @@ from coding_synchronization.StageABC import StageABC
 logger = logging.getLogger(__name__)
 
 
-class Syncer(StageABC):
+class SimpleSyncer(StageABC):
     def __init__(
         self,
         modparam: ModulationParams,
@@ -51,7 +51,7 @@ class Syncer(StageABC):
         self._last_sync_residual: np.ndarray | None = None
         self._last_sync_gap_dev: np.ndarray | None = None
         logger.info(
-            "Syncer initialized: sync_num=%d, word_period=%d, margin=%d, sync_value=%d",
+            "SimpleSyncer initialized: sync_num=%d, word_period=%d, margin=%d, sync_value=%d",
             sync_num, self.word_period, self.margin, self.sync_value,
         )
 
@@ -106,7 +106,7 @@ class Syncer(StageABC):
         # per million, so anything beyond a percent is a bad fit, not a better calibration.
         if abs(scale / scale_coarse - 1.0) > 0.01:
             logger.debug(
-                "Syncer: rejecting refined scale %.9g (coarse %.9g) — off by more than 1%%",
+                "SimpleSyncer: rejecting refined scale %.9g (coarse %.9g) — off by more than 1%%",
                 scale, scale_coarse,
             )
             return scale_coarse
@@ -133,13 +133,21 @@ class Syncer(StageABC):
         values = np.round(raw_values).clip(0, self.max_value).astype(np.uint16)
         return word_indices, values
 
-    def _sync_frame(self, positions: np.ndarray) -> np.ndarray | None:
+    def _acquire(self, positions: np.ndarray) -> tuple[np.ndarray, float, float] | None:
+        """Pass 1: locate the sync pulses and calibrate this frame's slot scale.
+
+        Returns `(pos, scale, frame_start)` — `pos` is `positions` calibrated to this frame's own
+        fitted `scale` — or `None` if too few pulses were captured to even attempt a fit. Also
+        sets the `_last_sync`/`_last_found`/`_last_frame_start`/`_last_sync_residual`/
+        `_last_sync_gap_dev` diagnostic scratch fields, same as before this was split out of
+        `_sync_frame`.
+        """
         pos_raw = np.sort(positions.astype(np.float64))
         if len(pos_raw) < self.sync_num:
             return None
 
         logger.debug(
-            "Syncer: pulse gaps in frame, delta(t)=%s ns",
+            "SimpleSyncer: pulse gaps in frame, delta(t)=%s ns",
             np.round(np.diff(pos_raw) * self.nominal_slot_time_s * 1e9, 3).tolist(),
         )
 
@@ -156,7 +164,7 @@ class Syncer(StageABC):
             gap_ratio = head_gaps / self.word_period
             with np.errstate(invalid="ignore", divide="ignore"):
                 error_metric = np.log(gap_ratio.std() * 3 * (self.max_value + 1) / gap_ratio.mean())
-            logger.debug("Syncer: gap-jitter error metric = %.6g", error_metric)
+            logger.debug("SimpleSyncer: gap-jitter error metric = %.6g", error_metric)
         scale_coarse = float(np.median(head_gaps)) / self.word_period if len(head_gaps) > 0 else 1.0
         if not np.isfinite(scale_coarse) or scale_coarse <= 0.0:
             scale_coarse = 1.0
@@ -174,7 +182,7 @@ class Syncer(StageABC):
         self._last_calibrated_positions = pos
         if abs(scale - 1.0) > 1e-9:
             logger.debug(
-                "Syncer: slot-time calibration scale=%.9g (coarse %.9g, %d/%d sync pulses in the "
+                "SimpleSyncer: slot-time calibration scale=%.9g (coarse %.9g, %d/%d sync pulses in the "
                 "refit) -> inferred slot_time=%.6g s (nominal was %.6g s)",
                 scale, scale_coarse, found, self.sync_num,
                 self.nominal_slot_time_s * scale, self.nominal_slot_time_s,
@@ -191,6 +199,10 @@ class Syncer(StageABC):
         self._last_sync_residual = sync_rel - self.sync_value
         self._last_sync_gap_dev = np.diff(sync_pos) - self.word_period
 
+        return pos, scale, frame_start
+
+    def _finish_decode(self, pos: np.ndarray, frame_start: float) -> np.ndarray:
+        """Pass 2: decode every non-sync word from calibrated positions `pos`."""
         # Do NOT pre-cut at frame_start + sync_num*word_period: a word carrying PPM value 0
         # sits exactly on that boundary, so a fraction of a slot of error in frame_start would
         # delete it. Sync words are removed below by `word_indices >= sync_num`, which has the
@@ -210,6 +222,13 @@ class Syncer(StageABC):
 
         _, first_occ = np.unique(word_indices, return_index=True)
         return values[first_occ]
+
+    def _sync_frame(self, positions: np.ndarray) -> np.ndarray | None:
+        acquired = self._acquire(positions)
+        if acquired is None:
+            return None
+        pos, _scale, frame_start = acquired
+        return self._finish_decode(pos, frame_start)
 
     def process(self, signal: np.ndarray) -> np.ndarray:
         results = []
@@ -254,9 +273,9 @@ class Syncer(StageABC):
                 )
             else:
                 failed += 1
-        logger.debug("Syncer: %d frames in, %d decoded, %d failed sync", len(signal), len(results), failed)
+        logger.debug("SimpleSyncer: %d frames in, %d decoded, %d failed sync", len(signal), len(results), failed)
         if failed > 0:
-            logger.warning("Syncer: %d/%d frames failed synchronization", failed, len(signal))
+            logger.warning("SimpleSyncer: %d/%d frames failed synchronization", failed, len(signal))
         return np.array(results, dtype=object)
 
     def reset(self) -> None:
@@ -277,6 +296,6 @@ class Syncer(StageABC):
 
     def __repr__(self) -> str:
         return (
-            f"Syncer(sync_num={self.sync_num}, word_period={self.word_period}, "
+            f"SimpleSyncer(sync_num={self.sync_num}, word_period={self.word_period}, "
             f"sync_value={self.sync_value})"
         )
