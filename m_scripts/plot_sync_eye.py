@@ -1,6 +1,6 @@
 """Overlay every sync pulse of a capture into two eye diagrams.
 
-    python plot_sync_eye.py measurments/RefCurve_....csv --eof-num 2 --threshold 0.3 ...
+    python m_scripts/plot_sync_eye.py measurments/RefCurve_....csv --eof-num 2 --threshold 0.3 ...
 
 The script accumulates the pulses into a density map, as the persistence display of an
 oscilloscope does. The colour of a bin gives the number of traces that pass through it, so the
@@ -35,6 +35,7 @@ from coding_synchronization.measurement.Cli import (
     extraction_params,
     figure_title,
     log_level,
+    parse_args_with_sidecar,
     split_replica,
     waveform_params,
 )
@@ -67,7 +68,7 @@ def _parse_args() -> argparse.Namespace:
         "--no-show", action="store_true",
         help="Save the figure, and do not open a window.",
     )
-    return parser.parse_args()
+    return parse_args_with_sidecar(parser)
 
 
 def main() -> None:

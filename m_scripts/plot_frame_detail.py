@@ -1,7 +1,7 @@
 """Compare the detected pulses of one frame against the raw waveform.
 
-    python plot_frame_detail.py measurments/RefCurve_....csv --eof-num 2 --threshold 0.3 ...
-    python plot_frame_detail.py ... --sections sync metadata     # the head of the frame only
+    python m_scripts/plot_frame_detail.py measurments/RefCurve_....csv --eof-num 2 --threshold 0.3 ...
+    python m_scripts/plot_frame_detail.py ... --sections sync metadata     # the head of the frame only
 
 The script cuts the raw signal around one frame and draws two sets of marks on it. The first set
 holds the pulses that OffsetExtractor detected. The second set holds an ideal PPM pulse at the
@@ -35,6 +35,7 @@ from coding_synchronization.measurement.Cli import (
     extraction_params,
     figure_title,
     log_level,
+    parse_args_with_sidecar,
     split_replica,
     waveform_params,
 )
@@ -84,7 +85,7 @@ def _parse_args() -> argparse.Namespace:
         "--no-show", action="store_true",
         help="Save the figure, and do not open a window.",
     )
-    return parser.parse_args()
+    return parse_args_with_sidecar(parser)
 
 
 def _locate_frame_start(

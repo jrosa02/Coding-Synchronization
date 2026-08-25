@@ -1,7 +1,7 @@
 """Decode measured pulse offsets into frames, and check the frames against their ECC.
 
-    python decode_measurement.py output/<ts>/offsets.npz --ppm-rank 10 --dead-slots 8
-    python decode_measurement.py measurments/RefCurve_....csv --threshold 0.05   # one command
+    python m_scripts/decode_measurement.py output/<ts>/offsets.npz --ppm-rank 10 --dead-slots 8
+    python m_scripts/decode_measurement.py measurments/RefCurve_....csv --threshold 0.05   # one command
 
 The script builds the pipeline MeasurementGen -> Splitter -> Syncer -> MetadataCheck -> Collector
 through Model2. It prints every decoded word of each frame, together with the sync diagnostics.
@@ -33,6 +33,7 @@ from coding_synchronization.measurement.Cli import (
     extract_calibrated,
     extraction_params,
     log_level,
+    parse_args_with_sidecar,
     waveform_params,
 )
 from coding_synchronization.measurement.OffsetExtractor import (
@@ -97,7 +98,7 @@ def _parse_args() -> argparse.Namespace:
         help="Print only the first N frames. The script still saves every frame to "
              "decoded.txt.",
     )
-    return parser.parse_args()
+    return parse_args_with_sidecar(parser)
 
 
 def _offsets_from(args: argparse.Namespace) -> tuple[
@@ -106,9 +107,13 @@ def _offsets_from(args: argparse.Namespace) -> tuple[
     """Return (offsets in slot units, seconds per slot, extraction params, waveform params)."""
     path = Path(args.path)
     if path.suffix == ".npz":
-        slots, meta = load_offsets(path)
-        # The .npz is already in slot units; keep the slot time it was extracted with.
-        return slots, float(meta.get("slot_time_s", args.slot_time)), None, None
+        with np.load(path) as npz:
+            is_offsets_file = "offsets_slots" in npz
+        if is_offsets_file:
+            slots, meta = load_offsets(path)
+            # The .npz is already in slot units; keep the slot time it was extracted with.
+            return slots, float(meta.get("slot_time_s", args.slot_time)), None, None
+        # else: a raw waveform .npz (ch_a/ch_b/dt_s) — fall through to the waveform path below.
 
     wp = waveform_params(args)
     wf = load_waveform(wp)
@@ -191,10 +196,15 @@ def _print_ecc_report(report: EccReport) -> None:
     print(f"  {report.n_frames} frames: {clean} clean, "
           f"{report.n_frames - clean - report.n_uncorrectable} corrected, "
           f"{report.n_uncorrectable} uncorrectable")
-    print(f"  {'':14} {'WER (symbol)':>14} {'BER (bit)':>14}")
-    print(f"  {'before ECC':14} {rates['wer_pre']:>14.3e} {rates['ber_pre']:>14.3e}")
-    print(f"  {'after ECC':14} {rates['wer_post']:>14.3e} {rates['ber_post']:>14.3e}")
+    print(f"  {'':24} {'WER (symbol)':>14} {'BER (bit)':>14}")
+    print(f"  {f'before ECC (of {report.n_decoded})':24} "
+          f"{rates['wer_pre']:>14.3e} {rates['ber_pre']:>14.3e}")
     print(f"  frame error rate (uncorrectable frames): {report.frame_error_rate:.3e}")
+    if report.n_uncorrectable:
+        # The pre-ECC rates cover the decoded frames only. An uncorrectable frame has no
+        # reference, so its error count cannot be measured, and it is counted here instead.
+        print(f"  the {report.n_uncorrectable} uncorrectable frames carry no reference, so they "
+              f"are outside the rates above")
 
 
 def _save_ecc_report(report: EccReport, out_dir: Path) -> None:

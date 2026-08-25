@@ -22,23 +22,36 @@ class MetadataCheck(StageABC):
 
     Without `strict` a mismatch increments `mismatches` and writes a warning. With `strict` it
     raises `ValueError`. The stage runs after `EccDecode`, so it tests corrected words.
+
+    A metadata word is a PPM value, so `FrameGen` wraps the counter into `0..value_range - 1`
+    (`value_range` is `2^ppm_rank`). Give the same `value_range` here, or a frame that lands on
+    the wrap point reads as a mismatch that never happened.
     """
 
     def __init__(
-        self, metadata_num: int = 4, verify: bool = False, strict: bool = False, seed: int = 42
+        self,
+        metadata_num: int = 4,
+        verify: bool = False,
+        strict: bool = False,
+        value_range: int | None = None,
+        seed: int = 42,
     ) -> None:
         super().__init__(seed)
         self.metadata_num = metadata_num
         self.verify = verify or strict
         self.strict = strict
+        self.value_range = value_range
         self.frames_checked = 0
         self.mismatches = 0
         self.metadata_frames: list[np.ndarray] = []
         self._next_expected: int | None = None
         logger.info(
-            "MetadataCheck initialized: metadata_num=%d, verify=%s, strict=%s",
-            metadata_num, self.verify, strict,
+            "MetadataCheck initialized: metadata_num=%d, verify=%s, strict=%s, value_range=%s",
+            metadata_num, self.verify, strict, value_range,
         )
+
+    def _wrap(self, value: int) -> int:
+        return value % self.value_range if self.value_range else value
 
     @property
     def mismatch_rate(self) -> float:
@@ -62,14 +75,14 @@ class MetadataCheck(StageABC):
             self._fail(index, got, f"holds fewer than {self.metadata_num} words", None)
             return
 
-        consecutive = list(range(got[0], got[0] + self.metadata_num))
+        consecutive = [self._wrap(got[0] + i) for i in range(self.metadata_num)]
         if got != consecutive:
             self._fail(index, got, "is not a consecutive counter", consecutive)
         elif self.strict and self._next_expected is not None and got[0] != self._next_expected:
-            expected = list(range(self._next_expected, self._next_expected + self.metadata_num))
+            expected = [self._wrap(self._next_expected + i) for i in range(self.metadata_num)]
             self._fail(index, got, "does not continue the counter", expected)
 
-        self._next_expected = got[0] + self.metadata_num
+        self._next_expected = self._wrap(got[0] + self.metadata_num)
 
     def process(
         self, signal: np.ndarray[tuple[Any, ...], np.dtype[Any]]
@@ -101,5 +114,5 @@ class MetadataCheck(StageABC):
     def __repr__(self) -> str:
         return (
             f"MetadataCheck(metadata_num={self.metadata_num}, verify={self.verify}, "
-            f"strict={self.strict})"
+            f"strict={self.strict}, value_range={self.value_range})"
         )

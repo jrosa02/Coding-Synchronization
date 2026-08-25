@@ -188,8 +188,43 @@ def sniff_format(path: Path) -> CsvFormat:
     return fmt
 
 
+def _load_npz(path: Path, params: WaveformParams) -> Waveform:
+    with np.load(path) as npz:
+        ch_a = np.asarray(npz["ch_a"], dtype=np.float32)
+        ch_b = (
+            np.asarray(npz["ch_b"], dtype=np.float32) if "ch_b" in npz else np.zeros_like(ch_a)
+        )
+        file_dt_s = float(npz["dt_s"])
+
+    dt_s = file_dt_s
+    if params.sample_rate is not None:
+        dt_s = params.sample_rate.to_s()
+        if abs(dt_s - file_dt_s) > 1e-3 * file_dt_s:
+            logger.warning(
+                "Overriding npz dt=%.6g s with --sample-rate dt=%.6g s", file_dt_s, dt_s,
+            )
+    if params.max_samples is not None:
+        ch_a = ch_a[: params.max_samples]
+        ch_b = ch_b[: params.max_samples]
+
+    fmt = CsvFormat(
+        delimiter=None, header_lines=0, n_cols=2, time_col=None,
+        value_cols=(0, 1), dt_s=file_dt_s, header_text=[],
+    )
+    wf = Waveform(ch_a=ch_a, ch_b=ch_b, dt_s=float(dt_s), fmt=fmt, source=path)
+    logger.info(
+        "Loaded %d samples from %s, dt=%.6g s (%.6g Sa/s), duration=%.6g s",
+        wf.n, path.name, wf.dt_s, 1.0 / wf.dt_s, wf.duration_s,
+    )
+    return wf
+
+
 def load_waveform(params: WaveformParams) -> Waveform:
     path = Path(params.path)
+    if path.suffix.lower() == ".npz":
+        if params.pos_col is not None or params.neg_col is not None:
+            logger.warning("--pos-col/--neg-col are ignored for .npz input (fixed ch_a/ch_b)")
+        return _load_npz(path, params)
     fmt = sniff_format(path)
 
     pos_col = params.pos_col if params.pos_col is not None else fmt.value_cols[0]

@@ -1,6 +1,6 @@
 """Draw a capture, its combined signal, and the distribution of its pulse gaps.
 
-    python visualize_measurement.py measurments/RefCurve_2026-08-18_0_124555.Wfm.csv
+    python m_scripts/visualize_measurement.py measurments/RefCurve_2026-08-18_0_124555.Wfm.csv
 
 The script prints the CSV format it found. It then draws five panels: the raw channels, the
 zero-centred channels, the combined signal with its threshold and its detected pulses, a zoom into
@@ -30,6 +30,7 @@ from coding_synchronization.measurement.Cli import (
     extraction_params,
     log_level,
     output_dir,
+    parse_args_with_sidecar,
     split_threshold,
     waveform_params,
 )
@@ -62,7 +63,7 @@ def _parse_args() -> argparse.Namespace:
         "--no-show", action="store_true",
         help="Save the figure, and do not open a window.",
     )
-    return parser.parse_args()
+    return parse_args_with_sidecar(parser)
 
 
 def main() -> None:

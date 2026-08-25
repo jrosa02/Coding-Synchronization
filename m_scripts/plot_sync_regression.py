@@ -1,7 +1,7 @@
 """Fit a line through the sync residuals, and show how far the residuals drift.
 
-    python plot_sync_regression.py measurments/RefCurve_....csv --eof-num 2 --threshold 0.3 ...
-    python plot_sync_regression.py ... --all-frames
+    python m_scripts/plot_sync_regression.py measurments/RefCurve_....csv --eof-num 2 --threshold 0.3 ...
+    python m_scripts/plot_sync_regression.py ... --all-frames
 
 The script plots the raw sync pulse offsets in slots against their word index. It calibrates them
 the way pass 1 of Syncer._sync_frame does, so the residual stays near zero instead of showing the
@@ -41,6 +41,7 @@ from coding_synchronization.measurement.Cli import (
     figure_title,
     log_level,
     output_dir,
+    parse_args_with_sidecar,
     waveform_params,
 )
 from coding_synchronization.measurement.OffsetExtractor import differential
@@ -79,7 +80,7 @@ def _parse_args() -> argparse.Namespace:
         "--no-show", action="store_true",
         help="Save the figure, and do not open a window.",
     )
-    return parser.parse_args()
+    return parse_args_with_sidecar(parser)
 
 
 def _frame_residual(

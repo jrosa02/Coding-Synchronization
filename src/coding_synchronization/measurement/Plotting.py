@@ -5,6 +5,7 @@ import numpy as np
 from matplotlib.axes import Axes
 
 from coding_synchronization.encoder import FrameParams
+from coding_synchronization.measurement.SyncMargin import fit_sync_residuals
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +67,15 @@ def plot_offset_regression(
     frame_words: int | None = None,
 ) -> None:
     """`y` (raw offsets, or a residual against some assumed decode) vs. its natural index `x`,
-    with an OLS line fit and a shaded standard-error band — visualizes exactly what Pass-1
-    calibration does. The fitted x=0 intercept is marked with its own uncertainty, not pinned to
-    0: it's expected to hover near zero, not be forced there.
+    with an OLS line fit and shaded ±1σ/±3σ residual-scatter bands — visualizes exactly what
+    Pass-1 calibration does. The fitted x=0 intercept is marked with its own uncertainty, not
+    pinned to 0: it's expected to hover near zero, not be forced there.
+
+    The σ bands are computed independently per pulse number (each unique `x` value gets its
+    own residual std, from whatever repeats land on that index — e.g. one sync-word position
+    across every frame in `--all-frames` mode), not pooled across the whole fit. A pulse
+    number some sync words consistently mistime more than others shows up as a locally wider
+    band instead of being averaged away.
 
     The fitted slope is reported with its own uncertainty and, when `frame_words` is given,
     extrapolated over a whole frame. A residual tilt only matters by how much it accumulates
@@ -91,28 +98,33 @@ def plot_offset_regression(
         ax.legend(loc="upper right", fontsize=8)
         return
 
-    xbar, ybar = x.mean(), y.mean()
-    sxx = float(np.sum((x - xbar) ** 2))
-    slope = float(np.sum((x - xbar) * (y - ybar)) / sxx)
-    intercept = float(ybar - slope * xbar)
+    fit = fit_sync_residuals(x, y)
+    slope, intercept = fit.slope, fit.intercept
+    intercept_se, slope_se = fit.intercept_se, fit.slope_se
     resid = y - (slope * x + intercept)
-    dof = n - 2
-    s2 = float(np.sum(resid**2) / dof) if dof > 0 else 0.0
-    intercept_se = math.sqrt(s2 * (1.0 / n + xbar**2 / sxx))
-    slope_se = math.sqrt(s2 / sxx)
 
     x_fit = np.linspace(min(0.0, x.min()), x.max(), 200)
     y_fit = slope * x_fit + intercept
-    se_fit = np.sqrt(s2 * (1.0 / n + (x_fit - xbar) ** 2 / sxx))
+    sigma_pooled = math.sqrt(fit.s2)
+
+    # Per-pulse-number sigma: group residuals by their (integer) x value and take each group's
+    # own std. A pulse number with only one sample (no repeats — e.g. single-frame mode) falls
+    # back to the pooled sigma, since a std from one point is undefined.
+    x_unique = np.unique(x)
+    sigma_per_x = np.array([
+        float(np.std(resid[x == xv], ddof=1)) if np.count_nonzero(x == xv) > 1 else sigma_pooled
+        for xv in x_unique
+    ])
+    y_fit_unique = slope * x_unique + intercept
 
     ax.plot(x_fit, y_fit, color="tab:red", linewidth=1.2, zorder=2, label="OLS fit")
     ax.fill_between(
-        x_fit, y_fit - se_fit, y_fit + se_fit, color="tab:red", alpha=0.25, zorder=1,
-        label="±1 SE",
+        x_unique, y_fit_unique - sigma_per_x, y_fit_unique + sigma_per_x, step="mid",
+        color="tab:red", alpha=0.25, zorder=1, label="±1σ (per pulse nr)",
     )
     ax.fill_between(
-        x_fit, y_fit - 2 * se_fit, y_fit + 2 * se_fit, color="tab:red", alpha=0.12, zorder=0,
-        label="±2 SE",
+        x_unique, y_fit_unique - 3 * sigma_per_x, y_fit_unique + 3 * sigma_per_x, step="mid",
+        color="tab:red", alpha=0.12, zorder=0, label="±3σ (per pulse nr)",
     )
 
     ax.axhline(0.0, color="black", linestyle=":", linewidth=0.8, alpha=0.6, label="y=0")

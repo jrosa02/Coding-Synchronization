@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,39 @@ def add_verbose_arg(parser: argparse.ArgumentParser) -> None:
 
 def log_level(args: argparse.Namespace) -> int:
     return logging.DEBUG if args.verbose else logging.INFO
+
+
+def _params_sidecar(path: Path) -> Path:
+    return Path(str(path) + ".params.json")
+
+
+def parse_args_with_sidecar(parser: argparse.ArgumentParser) -> argparse.Namespace:
+    """Parse args, seeding parser defaults from `<path>.params.json` first.
+
+    Precedence: CLI flag > sidecar JSON > argparse's built-in default. The sidecar lets a
+    measurement file's known-good decode parameters live next to the file instead of being
+    retyped on every command; see `measurments/testy_19082026/legend.txt` for the manual
+    version of the same idea.
+    """
+    ns, _ = parser.parse_known_args()
+    path = getattr(ns, "path", None)
+    if path is None:
+        return parser.parse_args()
+    sidecar = _params_sidecar(Path(path))
+    if not sidecar.exists():
+        return parser.parse_args()
+
+    raw = json.loads(sidecar.read_text())
+    overrides = {k.replace("-", "_"): v for k, v in raw.items()}
+    valid_dests = {a.dest for a in parser._actions}
+    unknown = set(overrides) - valid_dests
+    if unknown:
+        raise ValueError(f"{sidecar}: unknown parameter(s) {sorted(unknown)}")
+    parser.set_defaults(**overrides)
+    # setup_logging() hasn't run yet at this point in every caller (it needs -v/--verbose,
+    # which this very parse determines) — logger.info would silently vanish, so print instead.
+    print(f"Loaded defaults from {sidecar}: {overrides}")
+    return parser.parse_args()
 
 
 def add_title_arg(parser: argparse.ArgumentParser) -> None:
@@ -52,8 +86,9 @@ def add_waveform_args(parser: argparse.ArgumentParser) -> None:
     g = parser.add_argument_group("waveform")
     g.add_argument(
         "path", type=Path,
-        help="The waveform CSV file. The file holds two differential columns, as the R&S RefCurve "
-             "export does. A single-channel export with a tInc= header line also works.",
+        help="The waveform file, CSV or .npz. The CSV holds two differential columns, as the "
+             "R&S RefCurve export does; a single-channel export with a tInc= header line also "
+             "works. A .npz holds ch_a/ch_b/dt_s arrays, as written by the bin-to-npz converter.",
     )
     g.add_argument(
         "--sample-rate", type=float, default=None,

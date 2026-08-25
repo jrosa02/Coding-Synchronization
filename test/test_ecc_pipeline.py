@@ -45,6 +45,23 @@ def test_frame_gen_writes_valid_parity():
     assert [f.symbol_errors for f in report.frames] == [0, 0, 0]
 
 
+def test_metadata_counter_wraps_into_the_ppm_range():
+    """The metadata counter must never outgrow the PPM value range.
+
+    At 5 metadata words per frame the counter would exceed 1023 after roughly 205 frames if it
+    were not wrapped, and every word after that would be an invalid RS symbol. This produced an
+    IndexError deep inside reedsolo the first time FrameGen encoded real parity over a long run.
+    """
+    n_frames = 300  # comfortably past the ~205-frame wrap point
+    report = check_frames(_frames_from_encoder(n_frames), ECC)
+    assert report.n_frames == n_frames
+    assert report.n_uncorrectable == 0
+
+    max_value = (1 << PPM_RANK) - 1
+    for frame in _frames_from_encoder(n_frames):
+        assert int(frame.max()) <= max_value
+
+
 def test_frame_gen_rejects_a_layout_that_does_not_fit_the_field():
     """metadata + data + ecc must fit in 2^ppm_rank - 1 symbols."""
     too_big = FrameParams(sync_num=8, metadata_num=5, data_num=2000, ecc_num=16, eof_num=2)
@@ -99,6 +116,23 @@ def test_metadata_check_counts_a_mismatch_and_strict_raises():
 
     with pytest.raises(ValueError, match="is not a consecutive counter"):
         MetadataCheck(FRAME.metadata_num, strict=True).process(frames)
+
+
+def test_metadata_check_accepts_the_wrap_point_when_given_the_value_range():
+    """A counter that wraps from max_value back to 0 must not read as a mismatch."""
+    max_value = (1 << PPM_RANK) - 1
+    wrapping = np.array([max_value - 1, max_value, 0, 1, 2], dtype=np.uint16)
+    payload = np.zeros(FRAME.data_num, dtype=np.uint16)
+    frames = np.asanyarray([np.concatenate([wrapping, payload])], dtype=object)
+
+    stage = MetadataCheck(FRAME.metadata_num, verify=True, value_range=1 << PPM_RANK)
+    stage.process(frames)
+    assert stage.mismatches == 0
+
+    # Without value_range the same words look like a broken counter.
+    naive = MetadataCheck(FRAME.metadata_num, verify=True)
+    naive.process(frames)
+    assert naive.mismatches == 1
 
 
 def test_metadata_check_stays_silent_when_verification_is_off():

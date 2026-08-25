@@ -6,9 +6,10 @@ from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from matplotlib.figure import Figure
 import numpy as np
+from matplotlib.figure import Figure
 
+from coding_synchronization._logging import add_file_handler
 from coding_synchronization.channel import (
     AddedPulses,
     ChannelParams,
@@ -27,7 +28,6 @@ from coding_synchronization.encoder import (
     PassageGen,
     PassageParams,
 )
-from coding_synchronization._logging import add_file_handler
 from coding_synchronization.measurement.Collector import Collector
 from coding_synchronization.measurement.FrameFilter import FrameFilter
 from coding_synchronization.measurement.MeasurementGen import MeasurementGen
@@ -70,15 +70,15 @@ class ModelABC(abc.ABC):
             report.n_frames, clean, corrected, report.n_uncorrectable,
         )
         logger.info(
-            "ECC: before decoding WER=%.3e BER=%.3e | after decoding WER=%.3e BER=%.3e | "
+            "ECC: before decoding (over the %d decoded frames) WER=%.3e BER=%.3e | "
             "frame error rate=%.3e",
-            rates["wer_pre"], rates["ber_pre"], rates["wer_post"], rates["ber_post"],
-            report.frame_error_rate,
+            report.n_decoded, rates["wer_pre"], rates["ber_pre"], report.frame_error_rate,
         )
         if report.n_uncorrectable:
             logger.warning(
-                "ECC: %d/%d frames exceeded the %d-symbol correction limit — the pre-ECC rates "
-                "above are lower bounds", report.n_uncorrectable, report.n_frames,
+                "ECC: %d/%d frames exceeded the %d-symbol correction limit — they carry no "
+                "reference, so they are outside the pre-ECC rates above and are counted only in "
+                "the frame error rate", report.n_uncorrectable, report.n_frames,
                 report.params.correctable,
             )
 
@@ -101,6 +101,7 @@ class Model1(ModelABC):
         channel_params: ChannelParams,
         plot: bool = False,
         seed: int = 42,
+        split_eof_num: int | None = None,
     ) -> None:
         super().__init__(seed=seed)
         self.data = data
@@ -109,6 +110,12 @@ class Model1(ModelABC):
         self.overflight_params = overflight_params
         self.channel_params = channel_params
         self.plot = plot
+        # The Splitter threshold, in EOF words. None means "use frame_params.eof_num", which is
+        # the transmitted gap width. The receiver does not need that number: the threshold only
+        # has to sit between the largest gap inside a frame (word_period + max_value) and the
+        # smallest gap between frames. Setting it apart lets a wide transmitted gap coexist with
+        # a threshold that keeps a margin on both sides.
+        self.split_eof_num = split_eof_num
         self._gen: PassageGen | None = None
         self._collector: Collector | None = None
         self._synced: Collector | None = None
@@ -173,14 +180,15 @@ class Model1(ModelABC):
         if cp.sigma is not None:
             self.runner.append(RandomShift(sigma=cp.sigma))
             maybe_plot(2)
-        self.runner.append(
-            DopplerShift(
-                altitude_km=self.overflight_params.altitude_km,
-                slot_time_s=cp.chirp_duration_s,
-                tca_slot=cp.tca_chirp,
+        if cp.doppler:
+            self.runner.append(
+                DopplerShift(
+                    altitude_km=self.overflight_params.altitude_km,
+                    slot_time_s=cp.chirp_duration_s,
+                    tca_slot=cp.tca_chirp,
+                )
             )
-        )
-        maybe_plot(3)
+            maybe_plot(3)
         if cp.max_const_offset is not None:
             self.runner.append(ConstantOffset(cp.max_const_offset))
             maybe_plot(4)
@@ -188,7 +196,10 @@ class Model1(ModelABC):
             self.runner.append(AddedPulses(rate=cp.added_rate))
             maybe_plot(5)
         word_period = (1 << self.mod_params.ppm_rank) + self.mod_params.dead_slots
-        threshold = self.frame_params.eof_num * word_period
+        eof_for_split = (
+            self.frame_params.eof_num if self.split_eof_num is None else self.split_eof_num
+        )
+        threshold = eof_for_split * word_period
         self.runner.append(Splitter(threshold))
         maybe_plot(6)
         self.runner.append(Syncer(self.mod_params, self.frame_params.sync_num))
@@ -211,21 +222,32 @@ class Model1(ModelABC):
             self._corrected = Collector("corrected")
             self.runner.append(self._corrected)
         # FrameGen writes the metadata counter, so the simulation can verify it.
-        self._metadata = MetadataCheck(fp.metadata_num, verify=True)
+        self._metadata = MetadataCheck(
+            fp.metadata_num, verify=True, value_range=1 << self.mod_params.ppm_rank
+        )
         self.runner.append(self._metadata)
         maybe_plot(8)
         self._collector = Collector("payload")
         self.runner.append(self._collector)
 
-    def run(self) -> None:
+    def run(self, save_artifacts: bool = True) -> None:
+        """Run the pipeline. `save_artifacts=False` skips every file this method writes.
+
+        A sweep calls this once per point. Each call otherwise makes its own output directory and
+        adds another log file handler, and the handlers are never removed — run N then writes to
+        all N log files. The directory name has one-second resolution as well, so two fast runs
+        share one directory and overwrite each other. The ECC report and the metadata report are
+        attributes, so they survive either way.
+        """
         assert self._gen is not None, "call construct_pipeline() before run()"
 
-        output_dir = Path("output") / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        add_file_handler(output_dir / "run.log")
-        logger.info("Run started, output directory: %s", output_dir)
-
-        (output_dir / "pipeline.txt").write_text(repr(self.runner))
+        output_dir: Path | None = None
+        if save_artifacts:
+            output_dir = Path("output") / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            add_file_handler(output_dir / "run.log")
+            logger.info("Run started, output directory: %s", output_dir)
+            (output_dir / "pipeline.txt").write_text(repr(self.runner))
         logger.info("Pipeline: %s", repr(self.runner))
 
         self._gen.load(self.data)
@@ -236,20 +258,21 @@ class Model1(ModelABC):
             self._report_ecc(self.ecc_report)
         self._report_metadata(self._metadata)
 
-        for i, fig in enumerate(self._figures):
-            fig.tight_layout()
-            fig.savefig(output_dir / f"figure_{i}.png", dpi=150)
-            logger.debug("Saved figure_%d.png", i)
+        if output_dir is not None:
+            for i, fig in enumerate(self._figures):
+                fig.tight_layout()
+                fig.savefig(output_dir / f"figure_{i}.png", dpi=150)
+                logger.debug("Saved figure_%d.png", i)
 
-        params = {
-            "frame_params": dataclasses.asdict(self.frame_params),
-            "mod_params": dataclasses.asdict(self.mod_params),
-            "overflight_params": dataclasses.asdict(self.overflight_params),
-            "channel_params": dataclasses.asdict(self.channel_params),
-            "seed": self.seed,
-        }
-        (output_dir / "params.json").write_text(json.dumps(params, indent=2, default=str))
-        logger.info("Results saved to %s", output_dir)
+            params = {
+                "frame_params": dataclasses.asdict(self.frame_params),
+                "mod_params": dataclasses.asdict(self.mod_params),
+                "overflight_params": dataclasses.asdict(self.overflight_params),
+                "channel_params": dataclasses.asdict(self.channel_params),
+                "seed": self.seed,
+            }
+            (output_dir / "params.json").write_text(json.dumps(params, indent=2, default=str))
+            logger.info("Results saved to %s", output_dir)
 
         for fig in self._figures:
             plt.close(fig)
@@ -362,6 +385,7 @@ class Model2(ModelABC):
             self.frame_params.metadata_num,
             verify=self.verify_metadata,
             strict=self.strict_metadata,
+            value_range=1 << self.mod_params.ppm_rank,
         )
         self.runner.append(self._metadata)
         maybe_plot(4)
@@ -422,7 +446,7 @@ class Model2(ModelABC):
         params = {
             "frame_params": dataclasses.asdict(self.frame_params),
             "mod_params": dataclasses.asdict(self.mod_params),
-            "n_offsets": int(len(self.offsets)),
+            "n_offsets": len(self.offsets),
             "sync_value": None if self._syncer is None else self._syncer.sync_value,
             "seed": self.seed,
         }

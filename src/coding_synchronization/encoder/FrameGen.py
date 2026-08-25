@@ -33,6 +33,10 @@ class FrameGen:
             (params.sync_num, params.metadata_num, params.data_num, params.ecc_num)
         )
         self._meta_counter = 0
+        # The word matrix of the last encode(), shape (n_frames, frame_len). encode() returns
+        # pulse positions, which cannot be compared against what a decoder recovers. A simulation
+        # that wants a true error rate needs the words themselves as the reference.
+        self.frames_sent: np.ndarray | None = None
 
         # The ECC words are real Reed-Solomon parity over the metadata and data words, so a
         # simulated frame is a valid codeword and the decoder can correct it. Building the codec
@@ -76,9 +80,16 @@ class FrameGen:
         frames[:, :s0] = self.coarse_sync
 
     def _fill_metadata(self, frames: np.ndarray, s0: int, s1: int, n_frames: int) -> None:
+        """A counter that increases by one for every metadata word, wrapped into the PPM range.
+
+        Every metadata word is a PPM value, so it must stay within 0..max_value. Without the
+        wrap the counter would outgrow that range after a few hundred frames and hand the ECC
+        encoder a symbol that does not exist in its field.
+        """
         start = self._meta_counter + 1
-        counter = np.arange(start, start + n_frames * self.metadata_num, dtype=np.uint16)
-        frames[:, s0:s1] = counter.reshape(n_frames, self.metadata_num)
+        counter = np.arange(start, start + n_frames * self.metadata_num, dtype=np.int64)
+        counter %= self.max_value + 1
+        frames[:, s0:s1] = counter.reshape(n_frames, self.metadata_num).astype(np.uint16)
         self._meta_counter += n_frames * self.metadata_num
 
     def _fill_data(self, frames: np.ndarray, s1: int, s2: int, split_data: np.ndarray) -> None:
@@ -127,6 +138,7 @@ class FrameGen:
         self._fill_metadata(frames, s0, s1, n_frames)
         self._fill_data(frames, s1, s2, split_data)
         self._fill_ecc(frames, s0, s2, s3, n_frames)
+        self.frames_sent = frames.copy()
 
         positions = self._to_positions(frames, n_frames)
         logger.debug("encode: %d data words → %d frames, %d pulses", len(data), n_frames, len(positions))

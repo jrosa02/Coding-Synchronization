@@ -19,7 +19,7 @@ Read it first.
 1. **Look at the waveform.**
 
    ```bash
-   uv run visualize_measurement.py <capture.csv> --sample-rate 1e9 --combine sub
+   uv run m_scripts/visualize_measurement.py <capture.csv> --sample-rate 1e9 --combine sub
    ```
 
    Check the raw channels. One channel must hold the pulses. Check the combined signal. The pulses
@@ -28,7 +28,7 @@ Read it first.
 2. **Find a threshold.** Use the sweep when step 1 leaves you unsure.
 
    ```bash
-   uv run extract_offsets.py <capture.csv> --sweep 0.05 0.5 10 --sample-rate 1e9 --combine sub
+   uv run m_scripts/extract_offsets.py <capture.csv> --sweep 0.05 0.5 10 --sample-rate 1e9 --combine sub
    ```
 
    Pick a threshold in the range where the pulse count stays stable. A count that changes with
@@ -37,7 +37,7 @@ Read it first.
 3. **Decode the frames.**
 
    ```bash
-   uv run decode_measurement.py <capture.csv> --sample-rate 1e9 --combine sub --threshold 0.3 \
+   uv run m_scripts/decode_measurement.py <capture.csv> --sample-rate 1e9 --combine sub --threshold 0.3 \
      --ppm-rank 10 --dead-slots 16 --sync-num 8 --sync-value 0 \
      --metadata-num 5 --data-num 16 --ecc-num 16 --eof-num 2
    ```
@@ -59,7 +59,7 @@ Read it first.
 7. **Verify the data.** Add `--check-ecc` to the command in step 3.
 
    ```bash
-   uv run decode_measurement.py <capture.csv> ... --check-ecc
+   uv run m_scripts/decode_measurement.py <capture.csv> ... --check-ecc
    ```
 
    Frames that decode with zero corrections confirm the whole chain: the framing, the sync value,

@@ -35,6 +35,11 @@ class PassageParams:
     altitude_km: float
     max_elevation_deg: float
     time_s: float | None = None  # if set, caps the elevation-derived pass time
+    # If set, this many frames are sent and the pass geometry is ignored. The geometry only ever
+    # served to derive a frame count. A study that holds the frame count fixed — or that runs
+    # with Doppler off, where the orbit changes nothing — should state the count it wants instead
+    # of choosing an altitude that happens to allow it.
+    n_frames: int | None = None
 
 
 class PassageGen(StageABC):
@@ -55,15 +60,19 @@ class PassageGen(StageABC):
             * float(mod_params.slot_time)
         )
 
-        computed_time_s = _elevation_to_time(
-            overflight_params.altitude_km, overflight_params.max_elevation_deg
-        )
-        if overflight_params.time_s is not None:
-            actual_time_s = min(overflight_params.time_s, computed_time_s)
+        if overflight_params.n_frames is not None:
+            self.n_frames = max(1, int(overflight_params.n_frames))
+            actual_time_s = self.n_frames * frame_duration_s
         else:
-            actual_time_s = computed_time_s
+            computed_time_s = _elevation_to_time(
+                overflight_params.altitude_km, overflight_params.max_elevation_deg
+            )
+            if overflight_params.time_s is not None:
+                actual_time_s = min(overflight_params.time_s, computed_time_s)
+            else:
+                actual_time_s = computed_time_s
 
-        self.n_frames = max(1, math.floor(actual_time_s / frame_duration_s))
+            self.n_frames = max(1, math.floor(actual_time_s / frame_duration_s))
 
         self._data: np.ndarray | None = None
         self._generated = False

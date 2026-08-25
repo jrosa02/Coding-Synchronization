@@ -47,7 +47,7 @@ uv run main.py
 ## Decode a capture
 
 ```bash
-uv run decode_measurement.py measurments/<capture>.Wfm.csv \
+uv run m_scripts/decode_measurement.py measurments/<capture>.Wfm.csv \
   --sample-rate 1e9 --combine sub --threshold 0.3 \
   --ppm-rank 10 --dead-slots 16 --sync-num 8 --sync-value 0 \
   --metadata-num 5 --data-num 16 --ecc-num 16 --eof-num 2 --check-ecc

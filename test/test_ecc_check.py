@@ -72,15 +72,42 @@ def test_beyond_the_limit_the_frame_is_charged_in_full():
 
     report = check_frames(frames, params)
     assert report.n_uncorrectable == 1
+    assert report.n_decoded == 3
     assert report.frame_error_rate == pytest.approx(1 / 4)
 
     rates = report.rates()
     total_symbols = 4 * params.n
-    # Post-ECC: every symbol of the lost frame.
+    # Post-ECC: every symbol of the lost frame. Charging whole frames makes the symbol rate and
+    # the bit rate scale together, so both equal the frame error rate.
     assert rates["wer_post"] == pytest.approx(params.n / total_symbols)
     assert rates["ber_post"] == pytest.approx(params.n / total_symbols)
-    # Pre-ECC: the lower bound, one symbol past what RS can correct.
-    assert rates["wer_pre"] == pytest.approx((params.correctable + 1) / total_symbols)
+    assert rates["wer_post"] == pytest.approx(report.frame_error_rate)
+    # Pre-ECC covers the decoded frames only. The uncorrectable frame has no reference, so its
+    # error count is unmeasurable and it is left out rather than charged a made-up floor. The
+    # other three frames are clean, so the rate over them is exactly zero.
+    assert rates["wer_pre"] == 0.0
+    assert rates["ber_pre"] == 0.0
+
+
+def test_pre_ecc_rates_ignore_the_uncorrectable_frame():
+    """One damaged-but-decodable frame and one lost frame: only the first sets the pre-ECC rate."""
+    params = _params()
+    frames = _codewords(2)
+    # Frame 0 stays decodable: 3 symbols, 2 bits each.
+    for j in range(3):
+        frames[0][j] = int(frames[0][j]) ^ 0b101
+    # Frame 1 is past the limit and carries no reference.
+    for j in range(params.correctable + 4):
+        frames[1][j] = (int(frames[1][j]) + 1) % (1 << PPM_RANK)
+
+    report = check_frames(frames, params)
+    assert report.n_decoded == 1 and report.n_uncorrectable == 1
+
+    rates = report.rates()
+    # Exact over the one frame RS could read, not diluted by the frame it could not.
+    assert rates["wer_pre"] == pytest.approx(3 / params.n)
+    assert rates["ber_pre"] == pytest.approx(6 / (params.n * PPM_RANK))
+    assert report.frame_error_rate == pytest.approx(1 / 2)
 
 
 def test_wrong_length_frames_are_skipped_not_counted():

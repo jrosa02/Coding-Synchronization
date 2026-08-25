@@ -1,6 +1,6 @@
 """Find the pulses in a capture at a given threshold, and save their positions.
 
-    python extract_offsets.py measurments/RefCurve_2026-08-18_0_124555.Wfm.csv --threshold 0.05
+    python m_scripts/extract_offsets.py measurments/RefCurve_2026-08-18_0_124555.Wfm.csv --threshold 0.05
 
 The script removes the DC level of each channel, merges the two channels, and applies the
 threshold. It computes one position for every run above the threshold. It writes the positions in
@@ -31,6 +31,7 @@ from coding_synchronization.measurement.Cli import (
     log_level,
     min_separation_samples,
     output_dir,
+    parse_args_with_sidecar,
     slot_time_s,
     split_threshold,
     waveform_params,
@@ -62,7 +63,7 @@ def _parse_args() -> argparse.Namespace:
              "nothing.",
     )
     parser.add_argument("--no-plot", action="store_true", help="Do not draw the diagnostic figure.")
-    return parser.parse_args()
+    return parse_args_with_sidecar(parser)
 
 
 def main() -> None:

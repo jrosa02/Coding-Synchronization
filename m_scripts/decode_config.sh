@@ -8,10 +8,10 @@
 #
 # Usage: ./decode_config.sh [path/to/waveform.csv]
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")"
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 [ -f .envrc ] && source .envrc
 
-uv run decode_measurement.py "${1:-./measurments/RefCurve_2026-08-18_2_180749.Wfm.csv}" \
+uv run m_scripts/decode_measurement.py "${1:-./measurments/RefCurve_2026-08-18_2_180749.Wfm.csv}" \
   --sample-rate 1e9 \
   --combine sub \
   --ppm-rank 10 \

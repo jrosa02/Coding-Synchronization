@@ -5,13 +5,16 @@ words are the parity, and one PPM word is one GF(2^ppm_rank) symbol — so RS(me
 metadata+data) with ppm_rank-bit symbols, correcting up to ecc_num/2 symbol errors.
 
 There is no transmitted copy of the payload to compare against, so the *corrected* codeword is
-the reference: every symbol RS had to change is one that arrived wrong. That measures the channel
-exactly as long as RS decodes, and RS decoding is itself the check — a frame it cannot correct is
-counted as a frame error rather than folded into the symbol counts, because with more than
-ecc_num/2 bad symbols the true error count is unknowable (and a mis-correction, which RS can also
-produce beyond its limit, would understate it).
+the reference: every symbol RS had to change is one that arrived wrong. That is exact as long as
+RS decodes. Beyond its correction limit RS itself has nothing to compare against either, but the
+syndrome it already computes before attempting correction — specifically the Berlekamp-Massey
+error-locator degree — still gives a real estimate of how many symbols are bad, so pre-ECC rates
+are reported for every frame, not only the ones RS could correct. A frame it cannot correct is
+still counted as a frame error at the post-ECC level, because post-ECC has nothing usable to
+deliver regardless of how many symbols were actually wrong.
 """
 
+import itertools
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -51,6 +54,8 @@ class FrameResult:
     symbol_errors: int = 0         # symbols RS had to change; only meaningful when ok
     bit_errors: int = 0
     positions: list[int] = field(default_factory=list)
+    syndrome_symbol_errors: int = 0  # BM error-locator degree; exact when ok, an estimate when not
+    syndrome_bit_errors: int = 0     # bit_errors when ok, else syndrome_symbol_errors * ppm_rank
 
 
 @dataclass
@@ -73,31 +78,46 @@ class EccReport:
         """Frames RS could not correct — the rate that survives ECC at frame level."""
         return self.n_uncorrectable / self.n_frames if self.n_frames else 0.0
 
-    def rates(self) -> dict[str, float]:
-        """Word (symbol) and bit error rates either side of ECC decoding.
+    @property
+    def n_decoded(self) -> int:
+        """Frames RS read successfully. Only these have a measurable error count."""
+        return sum(1 for f in self.frames if f.ok)
 
-        Post-ECC counts every symbol of an uncorrectable frame as an error: RS delivers nothing
-        usable for such a frame, so charging it in full is the honest accounting.
+    def rates(self) -> dict[str, float]:
+        """Error rates either side of ECC decoding, over the whole frame population.
+
+        **The pre-ECC rates use a syndrome-based estimate, uniformly.** For a frame RS decoded,
+        the corrected codeword is an exact reference, so every symbol RS changed is a symbol that
+        arrived wrong — `syndrome_symbol_errors` equals that exact count. For a frame RS could not
+        decode there is no reference at all, but the Berlekamp-Massey error-locator degree
+        computed from the syndrome (see `_syndrome_error_estimate`) still gives a real, always-
+        available estimate of how many symbols are bad, not just a bound. It is exact up to
+        `correctable` errors and an estimate beyond it — BM can alias to a different, sometimes
+        smaller, degree once the true error count is large. Each bad symbol is charged the full
+        `bits_per_symbol` bits for `ber_pre`, matching the convention used everywhere else in this
+        report for a quantity that is not exactly known (a wrong-length frame, a lost frame's
+        post-ECC contribution): charge the whole word rather than an expected-value fraction of it.
+
+        **The post-ECC rates equal `frame_error_rate` by construction.** RS repairs every frame it
+        decodes, so a decoded frame contributes no residual error. An uncorrectable frame delivers
+        nothing usable, so it is charged in full. Charging whole frames makes the symbol rate and
+        the bit rate scale together, and the `bits_per_symbol` factor cancels. The three names
+        therefore carry one number. They are kept because callers read them, and because without a
+        reference copy of the payload no finer post-ECC measurement exists.
         """
         total_symbols = self.n_frames * self.symbols_per_frame
-        total_bits = total_symbols * self.bits_per_symbol
         if total_symbols == 0:
             return dict.fromkeys(("wer_pre", "ber_pre", "wer_post", "ber_post"), 0.0)
 
-        pre_symbols = sum(f.symbol_errors for f in self.frames if f.ok)
-        pre_bits = sum(f.bit_errors for f in self.frames if f.ok)
-        # An uncorrectable frame's own error count is unknown, so the pre-ECC figures charge it
-        # the least it can possibly hold: one more bad symbol than RS can correct, and — since a
-        # wrong symbol differs in at least one bit — that same number of bad bits. Both pre-ECC
-        # rates are therefore lower bounds whenever any frame is uncorrectable.
-        pre_symbols += self.n_uncorrectable * (self.params.correctable + 1)
-        pre_bits += self.n_uncorrectable * (self.params.correctable + 1)
+        total_bits = total_symbols * self.bits_per_symbol
+        pre_symbols = sum(f.syndrome_symbol_errors for f in self.frames)
+        pre_bits = sum(f.syndrome_bit_errors for f in self.frames)
         post_symbols = self.n_uncorrectable * self.symbols_per_frame
         return {
             "wer_pre": pre_symbols / total_symbols,
             "ber_pre": pre_bits / total_bits,
             "wer_post": post_symbols / total_symbols,
-            "ber_post": post_symbols * self.bits_per_symbol / total_bits,
+            "ber_post": post_symbols / total_symbols,
         }
 
 
@@ -116,6 +136,47 @@ def make_codec(params: EccParams) -> tuple["reedsolo.RSCodec", int]:
         generator=params.generator,
         c_exp=params.ppm_rank,
     ), prim
+
+
+def _syndrome_error_estimate(codec: "reedsolo.RSCodec", params: EccParams, values: list[int]) -> int:
+    """Berlekamp-Massey error-locator degree, computed from the syndrome alone.
+
+    This is `reedsolo.rs_find_error_locator`'s own algorithm, with its final Singleton-bound
+    check (`raise ReedSolomonError("Too many errors to correct")`) removed, so a frame beyond
+    `params.correctable` still returns a number instead of nothing. It is exact up to
+    `correctable` errors — `codec.decode()` would succeed at that point and report the same
+    count — and an estimate beyond it: BM can alias to a different, sometimes smaller, degree
+    once the true error count is large. See `EccReport.rates()` for how the estimate is used.
+
+    No erasures are ever passed to `codec.decode()` in this codebase, so the Forney syndrome
+    reduces to the plain syndrome with its leading (always-zero) coefficient dropped.
+    """
+    reedsolo.gf_log, reedsolo.gf_exp, reedsolo.field_charac = (
+        codec.gf_log, codec.gf_exp, codec.field_charac
+    )
+    synd = reedsolo.rs_calc_syndromes(values, params.ecc_num, params.fcr, params.generator)
+    if max(synd) == 0:
+        return 0
+    fsynd = synd[1:]
+    # reedsolo picks its internal array type (plain bytearray, or array('i', ...) for a field
+    # wider than GF(2^8)) as a side effect of constructing the codec, and keeps it in the
+    # module-global `_bytearray`. Use it here too, rather than plain lists, so it stays
+    # interoperable with gf_poly_add/gf_poly_scale exactly like reedsolo's own BM loop does.
+    err_loc = reedsolo._bytearray([1])
+    old_loc = reedsolo._bytearray([1])
+    for i in range(params.ecc_num):
+        delta = fsynd[i]
+        for j in range(1, len(err_loc)):
+            delta ^= reedsolo.gf_mul(err_loc[-(j + 1)], fsynd[i - j])
+        old_loc = old_loc + reedsolo._bytearray([0])
+        if delta != 0:
+            if len(old_loc) > len(err_loc):
+                new_loc = reedsolo.gf_poly_scale(old_loc, delta)
+                old_loc = reedsolo.gf_poly_scale(err_loc, reedsolo.gf_inverse(delta))
+                err_loc = new_loc
+            err_loc = reedsolo.gf_poly_add(err_loc, reedsolo.gf_poly_scale(old_loc, delta))
+    err_loc = list(itertools.dropwhile(lambda x: x == 0, err_loc))
+    return min(len(err_loc) - 1, params.n)
 
 
 def decode_frame(
@@ -138,7 +199,11 @@ def decode_frame(
         corrected = list(codec.decode(values)[1])
     except reedsolo.ReedSolomonError:
         logger.warning("Frame %d is uncorrectable (> %d bad symbols)", index, params.correctable)
-        return values, FrameResult(index=index, ok=False)
+        estimate = _syndrome_error_estimate(codec, params, values)
+        return values, FrameResult(
+            index=index, ok=False, syndrome_symbol_errors=estimate,
+            syndrome_bit_errors=estimate * params.ppm_rank,
+        )
 
     pairs = enumerate(zip(values, corrected, strict=True))
     bad = [j for j, (got, want) in pairs if got != want]
@@ -146,7 +211,8 @@ def decode_frame(
     if bad:
         logger.info("Frame %d: RS corrected %d symbols at %s", index, len(bad), bad)
     return corrected, FrameResult(
-        index=index, ok=True, symbol_errors=len(bad), bit_errors=bits, positions=bad
+        index=index, ok=True, symbol_errors=len(bad), bit_errors=bits, positions=bad,
+        syndrome_symbol_errors=len(bad), syndrome_bit_errors=bits,
     )
 
 
